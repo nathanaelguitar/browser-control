@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `browser-control click` provides a first-class Playwright-backed CLI click
+  with accessible role/name targeting, unique visible-text inference, selector
+  fallback, named-tab or URL-regex routing, double-click/right-click/modifier
+  options, and structured output.
+- MCP `browser_click` now accepts the same semantic `element` + optional `role`
+  contract while preserving the existing `selector` input.
+- A dedicated reliable-clicking guide and stronger canonical agent instructions
+  direct models to the click primitive instead of hand-written JavaScript.
+
+### Changed
+
+- Clicks fail on ambiguous elements or CLI page selection instead of silently
+  choosing the first match, and return the resolved strategy plus matched
+  element/page details after success.
+
 ## 1.1.0 — 2026-07-14
 
 ### Added

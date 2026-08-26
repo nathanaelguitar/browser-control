@@ -53,6 +53,8 @@ fn mcp_tools_list_returns_full_set() {
         "browser_navigate",
         "browser_get_html",
         "browser_take_screenshot",
+        "browser_snapshot",
+        "browser_click",
         "browser_fetch",
         "browser_curl",
         "browser_select_element",
@@ -143,6 +145,7 @@ fn help_lists_all_subcommands() {
         "list-running",
         "start",
         "mcp",
+        "click",
         "set",
         "get",
         "unset",
@@ -169,8 +172,24 @@ fn agent_instructions_print_canonical_guidance() {
         "browser_tab_list",
         "browser-control tab open",
         "browser_fetch",
+        "browser_click",
+        "never hand-write JavaScript to click",
+        "browser-control click",
         "wait-for-cookie",
     ] {
+        assert!(s.contains(expected), "missing {expected} in:\n{s}");
+    }
+}
+
+#[test]
+fn click_help_advertises_semantic_targeting() {
+    let out = Command::new(assert_cmd::cargo::cargo_bin("browser-control"))
+        .args(["click", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    for expected in ["ELEMENT", "--role", "--selector", "--target", "--fuzzy"] {
         assert!(s.contains(expected), "missing {expected} in:\n{s}");
     }
 }

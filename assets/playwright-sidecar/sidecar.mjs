@@ -135,14 +135,178 @@ async function methodSnapshot(params) {
   return { snapshot: yaml };
 }
 
+// Roles that normally represent something a user can activate. When the
+// caller supplies only a human-readable element name, search these first so
+// `click "Sign in"` resolves the same way a person reading the accessibility
+// snapshot would. We deliberately do not silently pick the first match: an
+// ambiguous click is much more dangerous than an actionable error.
+const CLICKABLE_ROLES = [
+  "button",
+  "link",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "tab",
+  "checkbox",
+  "radio",
+  "switch",
+  "option",
+  "combobox",
+  "textbox",
+  "searchbox",
+  "spinbutton",
+  "slider",
+  "treeitem",
+];
+
+async function requireUnique(locator, description, correction) {
+  const count = await locator.count();
+  if (count === 0) {
+    throw new Error(
+      `no element matched ${description}; capture a fresh browser_snapshot, ` +
+        `then retry with its exact role and accessible name${correction}`,
+    );
+  }
+  if (count > 1) {
+    throw new Error(
+      `${description} matched ${count} elements; refusing to guess. ` +
+        `Capture a fresh browser_snapshot and narrow the click${correction}`,
+    );
+  }
+  return locator;
+}
+
+async function resolveClickLocator(page, params) {
+  const selector = params.selector;
+  const element = params.element;
+  const role = params.role;
+  const exact = params.exact ?? true;
+
+  if (selector && (element || role)) {
+    throw new Error(
+      "choose one click strategy: `selector`, or semantic `element` with optional `role`",
+    );
+  }
+  if (role && !element) {
+    throw new Error("`role` requires `element` (the accessible name)");
+  }
+
+  if (selector) {
+    const locator = page.locator(selector);
+    return {
+      locator: await requireUnique(
+        locator,
+        `selector ${JSON.stringify(selector)}`,
+        " with a more specific selector",
+      ),
+      strategy: "selector",
+      selector,
+    };
+  }
+
+  if (!element) {
+    throw new Error(
+      "missing click target: pass `element` (recommended, optionally with `role`) or `selector`",
+    );
+  }
+
+  if (role) {
+    const locator = page.getByRole(role, { name: element, exact });
+    return {
+      locator: await requireUnique(
+        locator,
+        `${role} named ${JSON.stringify(element)}`,
+        " with a more exact accessible name or a selector",
+      ),
+      strategy: "role",
+      role,
+      element,
+      exact,
+    };
+  }
+
+  // A role/name pair is the most stable locator available from an aria
+  // snapshot. If the caller omitted the role, infer it only when exactly one
+  // interactive role matches. This keeps the one-argument CLI convenient
+  // without turning duplicate labels into a random click.
+  const roleMatches = [];
+  for (const candidateRole of CLICKABLE_ROLES) {
+    const locator = page.getByRole(candidateRole, { name: element, exact });
+    const count = await locator.count();
+    if (count > 0) roleMatches.push({ role: candidateRole, locator, count });
+  }
+  const roleMatchCount = roleMatches.reduce((sum, match) => sum + match.count, 0);
+  if (roleMatchCount === 1) {
+    const match = roleMatches[0];
+    return {
+      locator: match.locator,
+      strategy: "inferred-role",
+      role: match.role,
+      element,
+      exact,
+    };
+  }
+  if (roleMatchCount > 1) {
+    const summary = roleMatches.map((match) => `${match.role}:${match.count}`).join(", ");
+    throw new Error(
+      `element ${JSON.stringify(element)} matched ${roleMatchCount} interactive elements ` +
+        `(${summary}); refusing to guess. Retry with \`role\` from browser_snapshot or use \`selector\``,
+    );
+  }
+
+  // Some clickable controls have no useful computed role (custom widgets and
+  // click handlers on ordinary elements). Visible text is a safe last semantic
+  // fallback as long as the result is unique.
+  const textLocator = page.getByText(element, { exact });
+  return {
+    locator: await requireUnique(
+      textLocator,
+      `visible text ${JSON.stringify(element)}`,
+      " with `role`, a more exact name, or `selector`",
+    ),
+    strategy: "text",
+    element,
+    exact,
+  };
+}
+
 async function methodClick(params) {
   const page = await getPage(params.target_id);
-  const selector = params.selector;
-  if (!selector) throw new Error("missing 'selector'");
+  const resolved = await resolveClickLocator(page, params);
   const opts = {};
   if (params.timeout_ms !== undefined) opts.timeout = params.timeout_ms;
-  await page.locator(selector).click(opts);
-  return { ok: true };
+  if (params.button !== undefined) opts.button = params.button;
+  if (params.modifiers !== undefined) opts.modifiers = params.modifiers;
+
+  const preview = await resolved.locator.evaluate((node) => ({
+    tag: node.tagName.toLowerCase(),
+    text: (node.innerText || node.textContent || "").trim().replace(/\s+/g, " ").slice(0, 160),
+    aria_label: node.getAttribute("aria-label"),
+  }));
+
+  if (params.double_click) {
+    await resolved.locator.dblclick(opts);
+  } else {
+    await resolved.locator.click(opts);
+  }
+
+  let title = "";
+  try {
+    title = await page.title();
+  } catch {
+    // The click may intentionally close or replace the page. The successful
+    // input action is still useful; leave title blank in that case.
+  }
+  return {
+    ok: true,
+    strategy: resolved.strategy,
+    role: resolved.role,
+    element: resolved.element,
+    selector: resolved.selector,
+    matched: preview,
+    url: page.url(),
+    title,
+  };
 }
 
 async function methodType(params) {

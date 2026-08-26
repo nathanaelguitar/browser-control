@@ -63,6 +63,9 @@ rewrite) and ADR-002 (CLI lifecycle).
 - Playwright-only interaction tools route through a lazily-spawned Node
   sidecar wrapping `playwright-core`; on Firefox they return
   `EngineUnsupported`.
+- CLI `click` uses that same sidecar and CDP-only boundary. Semantic role/name
+  and text resolution must be unique; neither the sidecar nor CLI page routing
+  may silently pick the first match.
 - Stateful tools route through `ServerState::ensure_active_tab` (a
   server-owned named tab), never a blind "first page" attach.
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use browser_control::cli::{
-    agent_instructions, cookies, curl, eval, fetch, list, set, show, storage,
+    agent_instructions, click, cookies, curl, eval, fetch, list, set, show, storage,
     targets as cli_targets, wait, wait_for_cookie,
 };
 use clap::{Parser, Subcommand};
@@ -139,6 +139,44 @@ enum Command {
     Storage {
         #[command(subcommand)]
         action: storage::StorageCmd,
+    },
+    /// Click a page element with Playwright; prefer semantic role/name targeting.
+    Click {
+        /// Visible text or accessible name to click. Add --role when known.
+        #[arg(value_name = "ELEMENT", conflicts_with = "selector")]
+        element: Option<String>,
+        /// ARIA role from an accessibility snapshot, e.g. button or link.
+        #[arg(long, requires = "element", conflicts_with = "selector")]
+        role: Option<String>,
+        /// CSS or Playwright selector fallback. Mutually exclusive with ELEMENT/--role.
+        #[arg(long, conflicts_with = "element")]
+        selector: Option<String>,
+        #[arg(long, short = 'b', env = "BROWSER_CONTROL")]
+        browser: Option<String>,
+        /// Select a page by URL regex. Prefer a named tab for repeatable work.
+        #[arg(long)]
+        target: Option<String>,
+        /// Allow substring matching for semantic names/text (exact by default).
+        #[arg(long)]
+        fuzzy: bool,
+        /// Double-click instead of single-click.
+        #[arg(long)]
+        double_click: bool,
+        /// Mouse button to click.
+        #[arg(long, default_value = "left", value_parser = ["left", "right", "middle"])]
+        button: String,
+        /// Keyboard modifier to hold; repeat for multiple modifiers.
+        #[arg(
+            long = "modifier",
+            value_parser = ["Alt", "Control", "ControlOrMeta", "Meta", "Shift"]
+        )]
+        modifiers: Vec<String>,
+        /// Playwright action timeout in milliseconds.
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+        /// Print structured click details.
+        #[arg(long)]
+        json: bool,
     },
     /// Evaluate a JavaScript expression in the active page.
     Eval {
@@ -297,6 +335,34 @@ async fn main() -> Result<()> {
         }
         Command::Curl { browser, args } => curl::run(browser, args).await,
         Command::Storage { action } => storage::run(action).await,
+        Command::Click {
+            browser,
+            element,
+            role,
+            selector,
+            target,
+            fuzzy,
+            double_click,
+            button,
+            modifiers,
+            timeout_ms,
+            json,
+        } => {
+            click::run(
+                browser,
+                element,
+                role,
+                selector,
+                fuzzy,
+                double_click,
+                button,
+                modifiers,
+                target,
+                timeout_ms,
+                json,
+            )
+            .await
+        }
         Command::Eval {
             browser,
             expression,

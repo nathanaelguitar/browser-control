@@ -55,8 +55,8 @@ $script = irm https://raw.githubusercontent.com/rickardp/browser-control/main/sc
 
 Requires Rust 1.80 or newer when building from source. A Node runtime
 (`bun` preferred, `node`+`npm` accepted) is required only if you invoke the
-Playwright-only MCP tools (`browser_click`, `browser_snapshot`, etc.); the
-sidecar is spawned lazily on first use.
+Playwright-backed CLI `click` command or MCP tools (`browser_click`,
+`browser_snapshot`, etc.); the sidecar is spawned lazily on first use.
 
 ## Usage
 
@@ -66,7 +66,7 @@ machine-readable output.
 
 ### Browser selection
 
-Page-context commands (`eval`, `fetch`, `storage`, …) and browser-wide commands
+Page-context commands (`click`, `eval`, `fetch`, `storage`, …) and browser-wide commands
 (`targets`, `cookies`, `wait`, `wait-for-cookie`) accept a `--browser` / `-b`
 flag (with `$BROWSER_CONTROL` env fallback) to select the target browser. The
 external `curl` wrapper accepts `--browser` only because curl itself reserves
@@ -188,6 +188,11 @@ against the active browser's CDP endpoint; on Firefox they return
 `EngineUnsupported`. The `--playwright-version` flag overrides the pinned
 `playwright-core` version for the sidecar.
 
+`browser_click` accepts semantic `element` + `role` targeting from
+`browser_snapshot`, unique element text, or a selector fallback. It refuses
+ambiguous matches and returns the resolved strategy plus a matched-element
+preview, URL, and title. See [Reliable clicking](docs/clicking.md).
+
 `browser_select` switches the MCP server's active browser before preparing
 engine-specific state such as the Firefox BiDi lock. If that preparation fails
 (for example, another process holds Firefox's single BiDi session), the server
@@ -265,7 +270,7 @@ most subcommands. The syntax of the value decides how it is interpreted:
 
 Engine (CDP vs BiDi) is auto-detected for URL forms by probing.
 
-## HTTP, cookies, and storage
+## Browser interaction, HTTP, cookies, and storage
 
 A small set of session subcommands lets agents and shell scripts use a *real*
 browser session — with its cookies, headers, TLS stack, ad-blockers, and geo —
@@ -381,11 +386,45 @@ browser-control storage set theme dark -b brave --target '^https://app\.example\
 browser-control storage list --namespace session --key-regex '^feature_' --json
 ```
 
+### `click`
+
+Click with Playwright instead of hand-writing JavaScript. The shortest form
+uses a human-readable accessible name or visible text. Supplying the ARIA role
+shown in `browser_snapshot` is the most reliable form:
+
+```sh
+browser-control click -b brave/work "Sign in" --role button
+browser-control click -b brave/work "Continue"                 # unique name/text
+browser-control click -b brave/work --selector '[data-testid="save"]'
+browser-control click -b brave --target '^https://app\.example\.com/' \
+    "Submit" --role button --json
+```
+
+Semantic names match exactly by default. `--fuzzy` enables substring matching.
+The command refuses to guess when an element or page selection is ambiguous;
+add `--role`, address a named tab with `-b browser/tab`, or narrow `--target`.
+Optional `--double-click`, `--button`, and repeatable `--modifier` flags cover
+less common input gestures.
+
+The corresponding MCP call is similarly direct:
+
+```json
+{ "element": "Sign in", "role": "button" }
+```
+
+Call `browser_snapshot` first when the role or exact accessible name is not
+obvious. CSS/Playwright `selector` targeting remains available as a fallback.
+See [Reliable clicking](docs/clicking.md) for the full CLI and MCP workflow,
+ambiguity behavior, and troubleshooting.
+
 ### `eval`
 
 Evaluate a JavaScript expression in the active page. Returns the result as
 plain text by default; `--json` emits the full evaluation envelope.
 Page-context — supports tab suffixes via `-b browser/tab`.
+
+`eval` is the escape hatch for page-specific logic. Use `click` /
+`browser_click` for interaction rather than evaluating `element.click()`.
 
 ```sh
 browser-control eval 'document.title'
@@ -457,18 +496,21 @@ browser-control eval -b brave/cart 'document.title'               # use in page-
 
 `tab list --all` surfaces unnamed tabs with their target IDs. Use
 `tab adopt <browser>/<name> <target-id>` to bind them to a name, making
-them addressable via `-b <browser>/<name>` in `eval`, `fetch`, `storage`.
+them addressable via `-b <browser>/<name>` in `click`, `eval`, `fetch`, and
+`storage`.
 
 ## MCP integration
 
 `browser-control` is itself an MCP server when invoked as `mcp`. Add it to
 your host's `.mcp.json` like any other stdio server.
 
-Default tools (exposed by the Rust server) include `navigate`, `get_dom`,
-`screenshot`, `fetch`, `select_element`, plus the session ops introduced in
-this release: `list_targets`, `cookies`, `storage_get`, `storage_set`, and
-`wait_for_cookie`. See [docs/session-ops.md](docs/session-ops.md) for the
-underlying model.
+Default tools include `browser_navigate`, `browser_snapshot`, `browser_click`,
+`browser_get_html`, `browser_take_screenshot`, `browser_fetch`,
+`browser_select_element`, tab/browser management, cookies, and storage. For
+clicks, prefer the role + accessible-name pair from `browser_snapshot`; the
+tool deliberately fails ambiguous matches rather than selecting the first
+element. See [Reliable clicking](docs/clicking.md) for interaction guidance and
+[docs/session-ops.md](docs/session-ops.md) for the underlying session model.
 
 ```json
 {

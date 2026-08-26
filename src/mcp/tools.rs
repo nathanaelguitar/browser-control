@@ -221,7 +221,10 @@ fn make_navigate() -> RegisteredTool {
 fn make_eval() -> RegisteredTool {
     RegisteredTool {
         name: "browser_eval".into(),
-        description: "Evaluate a JavaScript expression in the active page.".into(),
+        description: "Evaluate a JavaScript expression in the active page. Use this only when no \
+                      higher-level tool fits; use browser_click for clicks instead of scripting \
+                      DOM events."
+            .into(),
         input_schema: json!({
             "type": "object",
             "properties": tab_args_properties(json!({
@@ -1540,25 +1543,113 @@ impl SidecarTool {
 }
 
 fn make_click() -> RegisteredTool {
-    SidecarTool {
-        name: "browser_click",
-        description: "Click an element matched by CSS selector. Chromium-only.",
-        method: "click",
-        params: vec![
-            SidecarParam {
-                name: "selector",
-                schema: json!({"type": "string"}),
-                required: true,
-            },
-            SidecarParam {
-                name: "timeout_ms",
-                schema: json!({"type": "integer"}),
-                required: false,
-            },
-        ],
-        success: "clicked",
+    let params = [
+        SidecarParam {
+            name: "element",
+            schema: json!({
+                "type": "string",
+                "description": "Human-readable visible text or accessible name. Recommended. Pair with `role` when the snapshot shows one."
+            }),
+            required: false,
+        },
+        SidecarParam {
+            name: "role",
+            schema: json!({
+                "type": "string",
+                "description": "Optional ARIA role from browser_snapshot, such as `button` or `link`. Requires `element`."
+            }),
+            required: false,
+        },
+        SidecarParam {
+            name: "selector",
+            schema: json!({
+                "type": "string",
+                "description": "CSS or Playwright selector fallback. Use instead of `element`/`role`, not alongside them."
+            }),
+            required: false,
+        },
+        SidecarParam {
+            name: "exact",
+            schema: json!({
+                "type": "boolean",
+                "default": true,
+                "description": "Require an exact semantic name/text match (default true)."
+            }),
+            required: false,
+        },
+        SidecarParam {
+            name: "double_click",
+            schema: json!({
+                "type": "boolean",
+                "default": false,
+                "description": "Double-click instead of single-click."
+            }),
+            required: false,
+        },
+        SidecarParam {
+            name: "button",
+            schema: json!({
+                "type": "string",
+                "enum": ["left", "right", "middle"],
+                "default": "left"
+            }),
+            required: false,
+        },
+        SidecarParam {
+            name: "modifiers",
+            schema: json!({
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["Alt", "Control", "ControlOrMeta", "Meta", "Shift"]
+                },
+                "description": "Keyboard modifiers held during the click."
+            }),
+            required: false,
+        },
+        SidecarParam {
+            name: "timeout_ms",
+            schema: json!({
+                "type": "integer",
+                "minimum": 0,
+                "description": "Playwright action timeout in milliseconds."
+            }),
+            required: false,
+        },
+    ];
+
+    let extra = Value::Object(
+        params
+            .iter()
+            .map(|p| (p.name.to_string(), p.schema.clone()))
+            .collect(),
+    );
+    let param_names: Vec<&'static str> = params.iter().map(|p| p.name).collect();
+    RegisteredTool {
+        name: "browser_click".into(),
+        description: "Primary click primitive. Do not use browser_eval/JavaScript for clicks. \
+                      Prefer `element` + `role` copied from browser_snapshot (for example, \
+                      element=`Sign in`, role=`button`). For unique visible text, `element` \
+                      alone works. Use `selector` only as a fallback. Ambiguous matches fail \
+                      instead of guessing. Chromium-only."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": tab_args_properties(extra),
+        }),
+        handler: handler(move |state, args| {
+            let param_names = param_names.clone();
+            Box::pin(async move {
+                let mut forwarded = serde_json::Map::new();
+                for key in &param_names {
+                    copy_arg(&args, key, &mut forwarded);
+                }
+                let result =
+                    forward_to_sidecar(&state, "browser_click", &args, "click", forwarded).await?;
+                Ok(text_content(serde_json::to_string_pretty(&result)?))
+            })
+        }),
     }
-    .build()
 }
 
 fn make_type() -> RegisteredTool {
@@ -2044,20 +2135,21 @@ mod tests {
         }
     }
 
-    /// `browser_click` / `browser_type` etc. require their selector
-    /// args; `browser_snapshot` / `browser_pdf_save` / `browser_wait_for`
-    /// don't (snapshot is page-wide, wait_for has multiple alternative
-    /// conditions, pdf is page-wide).
+    /// `browser_click` supports alternative semantic/selector strategies, so
+    /// its target is validated at runtime. `browser_type` still requires a
+    /// selector + text; snapshot/pdf/wait have no universal required arg.
     #[test]
     fn sidecar_tools_required_args() {
         let click = schema_for("browser_click");
-        let req: Vec<&str> = click["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert!(req.contains(&"selector"));
+        assert!(
+            click.get("required").is_none() || click["required"].as_array().unwrap().is_empty()
+        );
+        assert_eq!(click["properties"]["element"]["type"], "string");
+        assert_eq!(click["properties"]["role"]["type"], "string");
+        assert_eq!(click["properties"]["selector"]["type"], "string");
+        assert_eq!(click["properties"]["exact"]["default"], true);
+        assert_eq!(click["properties"]["double_click"]["type"], "boolean");
+        assert_eq!(click["properties"]["modifiers"]["type"], "array");
 
         let t = schema_for("browser_type");
         let req: Vec<&str> = t["required"]
@@ -2074,6 +2166,18 @@ mod tests {
         assert!(snap.get("required").is_none() || snap["required"].as_array().unwrap().is_empty());
         let pdf = schema_for("browser_pdf_save");
         assert!(pdf.get("required").is_none() || pdf["required"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn click_and_eval_descriptions_steer_agents_to_click_primitive() {
+        let click = tool_description("browser_click");
+        assert!(click.contains("Primary click primitive"));
+        assert!(click.contains("Do not use browser_eval"));
+        assert!(click.contains("element"));
+        assert!(click.contains("role"));
+
+        let eval = tool_description("browser_eval");
+        assert!(eval.contains("use browser_click for clicks"));
     }
 
     /// Sidecar tool against a BiDi browser must error with
