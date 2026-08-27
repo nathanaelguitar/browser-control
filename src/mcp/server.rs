@@ -364,6 +364,10 @@ impl ServerState {
             (Some(name), None) => {
                 let backend = self.ensure_backend().await?;
                 let browser_name = self.registered_browser_name().await?;
+                // Agent-facing docs address tabs as `<browser>/<tab>`, so accept
+                // that qualified form here instead of looking up a tab literally
+                // named "chromium/work" and reporting it missing.
+                let name = strip_browser_prefix(&browser_name, name).await?;
                 // Mimic `session::tabs::resolve_tab` here so we never hold
                 // a `!Send` `Registry` across `.await`: sync registry-read,
                 // async liveness probe, sync registry-mutate.
@@ -488,6 +492,44 @@ impl ServerState {
 /// `Registry::open` never park a tokio worker. The `!Send` `Registry` is
 /// created and dropped entirely inside the closure, so it never crosses an
 /// `.await`.
+/// Accept the documented `<browser>/<tab>` tab selector in MCP `tab` args.
+///
+/// The CLI addresses tabs as `<browser>/<name>`, and the canonical agent
+/// instructions tell models to do the same, so models naturally pass the
+/// qualified form to MCP tools too. Treating it as an opaque tab name makes
+/// a correct call fail as `TabNotFound` with a nonsensical hint
+/// (`tab open <browser>/<browser>/<name>`), which reads like a registry
+/// mismatch and pushes agents onto URL-regex fallbacks.
+///
+/// A bare name passes through untouched. A qualified name is accepted when
+/// the prefix identifies the active browser either by its registered name
+/// (`chromium-stardust/work`) or by its kind (`chromium/work`). A prefix
+/// naming a *different* browser is a real error and says so, rather than
+/// silently retargeting the call.
+async fn strip_browser_prefix(browser_name: &str, tab: String) -> Result<String> {
+    let Some((prefix, rest)) = tab.split_once('/') else {
+        return Ok(tab);
+    };
+    if rest.is_empty() {
+        return Ok(tab);
+    }
+    if prefix.eq_ignore_ascii_case(browser_name) {
+        return Ok(rest.to_string());
+    }
+    let bn = browser_name.to_string();
+    let kind = sync_registry_op(move |reg| reg.get_by_name(&bn))
+        .await?
+        .map(|row| row.kind);
+    if kind.is_some_and(|k| prefix.eq_ignore_ascii_case(k.as_str())) {
+        return Ok(rest.to_string());
+    }
+    Err(anyhow::anyhow!(
+        "tab `{tab}` names browser `{prefix}`, but the active browser is \
+         `{browser_name}` — call `browser_select` to switch browsers first, \
+         or pass just the tab name `{rest}`"
+    ))
+}
+
 pub(crate) async fn sync_registry_op<T, F>(f: F) -> Result<T>
 where
     F: FnOnce(&crate::registry::Registry) -> Result<T> + Send + 'static,
@@ -1248,6 +1290,54 @@ mod tests {
             Err(e) => panic!("named tab should resolve: {e:#}"),
         };
         assert_eq!(target_id, "T1");
+
+        std::env::remove_var("BROWSER_CONTROL_DATA_DIR");
+    }
+
+    // See note above: ENV_LOCK is intentionally held across awaits.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn resolve_named_tab_accepts_browser_qualified_selector() {
+        let _g = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("BROWSER_CONTROL_DATA_DIR", tmp.path());
+
+        {
+            let reg = crate::registry::Registry::open().unwrap();
+            reg.tab_upsert("bx", "work", "T1", "about:blank", true)
+                .unwrap();
+        }
+
+        let (url, _conns, _stop) = spawn_counting_cdp_mock(vec!["T1".into()]).await;
+        // `register_browser_row` registers kind Chrome under the name `bx`.
+        register_browser_row("bx", &url);
+        let state = registered_state("bx", &url);
+
+        // The documented `<browser>/<tab>` form must resolve, addressed both
+        // by registered name and by browser kind — not be treated as a tab
+        // literally named "bx/work".
+        for selector in ["bx/work", "chrome/work"] {
+            match state
+                .resolve_target_for_args(&json!({ "tab": selector }))
+                .await
+            {
+                Ok((_backend, tid)) => assert_eq!(tid, "T1", "for {selector}"),
+                Err(e) => panic!("`{selector}` should resolve: {e:#}"),
+            }
+        }
+
+        // A prefix naming a different browser is a real error, not a silent
+        // retarget onto the active browser.
+        let err = match state
+            .resolve_target_for_args(&json!({"tab": "firefox/work"}))
+            .await
+        {
+            Ok(_) => panic!("mismatched browser prefix must error"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("names browser `firefox`"), "{err}");
 
         std::env::remove_var("BROWSER_CONTROL_DATA_DIR");
     }

@@ -54,7 +54,7 @@ $script = irm https://raw.githubusercontent.com/rickardp/browser-control/main/sc
 ```
 
 Requires Rust 1.80 or newer when building from source. A Node runtime
-(`bun` preferred, `node`+`npm` accepted) is required only if you invoke the
+(`node`+`npm` preferred, `bun` accepted as a fallback) is required only if you invoke the
 Playwright-backed CLI `click` command or MCP tools (`browser_click`,
 `browser_snapshot`, etc.); the sidecar is spawned lazily on first use.
 
@@ -183,7 +183,7 @@ Playwright-only interaction tools (`browser_click`,
 `browser_type`, `browser_snapshot`, `browser_press_key`, `browser_drag`,
 `browser_hover`, `browser_wait_for`, `browser_pdf_save`) route through an
 internal Node sidecar that wraps `playwright-core`. On the first call to one
-of these tools the sidecar is spawned (prefers `bun`, falls back to `node`+`npm`)
+of these tools the sidecar is spawned (prefers `node`+`npm`, falls back to `bun`)
 against the active browser's CDP endpoint; on Firefox they return
 `EngineUnsupported`. The `--playwright-version` flag overrides the pinned
 `playwright-core` version for the sidecar.

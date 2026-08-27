@@ -1,0 +1,10 @@
+{
+  "name": "browser-control",
+  "version": "1.1.0",
+  "description": "Default browser automation for Canopy Code: navigate, click, snapshot, cookies, storage, and authenticated fetch via a real browser over CDP/BiDi.",
+  "mcpServers": {
+    "browser-control": {
+      "command": "${extensionPath}${/}scripts${/}mcp-wrapper.sh"
+    }
+  }
+}

@@ -1,8 +1,7 @@
 {
   "mcpServers": {
     "browser-control": {
-      "command": "browser-control",
-      "args": ["mcp"]
+      "command": "./scripts/mcp-wrapper.sh"
     }
   }
 }

@@ -85,6 +85,7 @@ pub fn register_all(registry: &ToolRegistry) {
     registry.register(make_snapshot());
     registry.register(make_click());
     registry.register(make_type());
+    registry.register(make_set_input_files());
     registry.register(make_hover());
     registry.register(make_drag());
     registry.register(make_press_key());
@@ -1686,6 +1687,57 @@ fn make_type() -> RegisteredTool {
     .build()
 }
 
+fn make_set_input_files() -> RegisteredTool {
+    let extra = json!({
+        "selector": {
+            "type": "string",
+            "description": "CSS or Playwright selector matching a file input."
+        },
+        "paths": {
+            "anyOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" } }
+            ],
+            "description": "Absolute path(s) of the file(s) to attach. No file-picker dialog is shown."
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Playwright action timeout in milliseconds."
+        }
+    });
+    let input_schema = json!({
+        "type": "object",
+        "properties": tab_args_properties(extra),
+        "required": ["selector", "paths"]
+    });
+    RegisteredTool {
+        name: "browser_set_input_files".into(),
+        description: "Set file(s) directly on a file input via Playwright setInputFiles \
+                      (no file-picker dialog). `paths` accepts a string or array of absolute \
+                      paths. Returns the resulting FileList names and sizes. Chromium-only."
+            .into(),
+        input_schema,
+        handler: handler(|state, args| {
+            Box::pin(async move {
+                let mut forwarded = serde_json::Map::new();
+                for key in ["selector", "paths", "timeout_ms"] {
+                    copy_arg(&args, key, &mut forwarded);
+                }
+                let result = forward_to_sidecar(
+                    &state,
+                    "browser_set_input_files",
+                    &args,
+                    "set_input_files",
+                    forwarded,
+                )
+                .await?;
+                Ok(text_content(serde_json::to_string_pretty(&result)?))
+            })
+        }),
+    }
+}
+
 fn make_hover() -> RegisteredTool {
     SidecarTool {
         name: "browser_hover",
@@ -1788,10 +1840,22 @@ fn make_pdf_save() -> RegisteredTool {
                     .get("pdf_base64")
                     .and_then(|s| s.as_str())
                     .unwrap_or_default();
+                // `uri` is required on MCP resource contents; omitting it makes
+                // strict clients reject an otherwise valid PDF. Prefer the page
+                // address, falling back to an opaque scheme when it's unknown.
+                let uri = v
+                    .get("url")
+                    .and_then(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("browser-control://pdf");
                 Ok(json!({
                     "content": [{
                         "type": "resource",
-                        "resource": { "mimeType": "application/pdf", "blob": b64 }
+                        "resource": {
+                            "uri": uri,
+                            "mimeType": "application/pdf",
+                            "blob": b64
+                        }
                     }]
                 }))
             })
@@ -1839,6 +1903,7 @@ mod tests {
         "browser_snapshot",
         "browser_click",
         "browser_type",
+        "browser_set_input_files",
         "browser_hover",
         "browser_drag",
         "browser_press_key",

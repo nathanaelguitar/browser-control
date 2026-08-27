@@ -8,9 +8,9 @@
 //!
 //! Lifecycle (per `Sidecar` instance):
 //!
-//! 1. [`Sidecar::start`] — picks a launcher (`bun` preferred, then
-//!    `node`), prepares the cache directory containing the bundled
-//!    `sidecar.mjs` + `package.json`, runs `bun install` /
+//! 1. [`Sidecar::start`] — picks a launcher (`node` preferred, then
+//!    `bun`), prepares the cache directory containing the bundled
+//!    `sidecar.mjs` + `package.json`, runs `npm install` /
 //!    `npm install` if the deps aren't already there, then spawns the
 //!    child with stdin/stdout piped.
 //! 2. [`Sidecar::connect`] — sends a `connect` RPC carrying the CDP
@@ -46,9 +46,10 @@ mod tests;
 pub const DEFAULT_PLAYWRIGHT_VERSION: &str = "1.49.1";
 
 /// Bound Playwright's initial CDP attach below common MCP client call
-/// timeouts, so browser-control can classify and explain connection-layer
-/// failures instead of letting the client time out first.
-const CONNECT_TIMEOUT_MS: u64 = 5_000;
+/// timeouts, while allowing a freshly launched Chromium enough time to finish
+/// exposing its CDP endpoint on slower machines.  This is separate from an
+/// action timeout: it protects the one-time `connectOverCDP` bootstrap.
+const CONNECT_TIMEOUT_MS: u64 = 15_000;
 
 /// User-facing configuration for spawning a sidecar.
 #[derive(Debug, Clone, Default)]
@@ -68,20 +69,21 @@ impl SidecarConfig {
 /// Which runtime + package manager we use to launch the sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Launcher {
-    /// Bun: faster startup, single binary. Uses `bun install` + `bun run`.
+    /// Bun fallback: single binary. Uses `bun install` + `bun run`.
     Bun,
-    /// Node + npm: more universally installed. Uses `npm install --silent` + `node`.
+    /// Node + npm: Playwright's reference runtime. Uses `npm install --silent` + `node`.
     Node,
 }
 
 impl Launcher {
-    /// Detect what's available. Prefers `bun`, falls back to `node` + `npm`.
+    /// Detect a JavaScript runtime. Prefer Node, Playwright's reference
+    /// runtime; Bun remains a fallback for installations without Node.
     pub fn detect() -> Result<Launcher> {
-        if which::which("bun").is_ok() {
-            return Ok(Launcher::Bun);
-        }
         if which::which("node").is_ok() && which::which("npm").is_ok() {
             return Ok(Launcher::Node);
+        }
+        if which::which("bun").is_ok() {
+            return Ok(Launcher::Bun);
         }
         Err(anyhow!(
             "neither `bun` nor `node`+`npm` is on PATH. \

@@ -20,6 +20,7 @@
 
 import { chromium } from "playwright-core";
 import readline from "node:readline";
+import { existsSync } from "node:fs";
 
 // ---------------------------------------------------------------------------
 // State.
@@ -326,6 +327,28 @@ async function methodType(params) {
   return { ok: true };
 }
 
+async function methodSetInputFiles(params) {
+  const page = await getPage(params.target_id);
+  const selector = params.selector;
+  const paths = params.paths;
+  if (!selector) throw new Error("missing 'selector'");
+  if (!paths) throw new Error("missing 'paths' (string or array of file paths)");
+  const list = Array.isArray(paths) ? paths : [paths];
+  if (list.length === 0) throw new Error("'paths' must contain at least one path");
+  for (const p of list) {
+    if (typeof p !== "string" || !existsSync(p)) {
+      throw new Error(`file not found: ${JSON.stringify(p)}`);
+    }
+  }
+  const opts = {};
+  if (params.timeout_ms !== undefined) opts.timeout = params.timeout_ms;
+  await page.locator(selector).setInputFiles(list, opts);
+  const files = await page.locator(selector).evaluate((el) =>
+    [...el.files].map((f) => ({ name: f.name, size: f.size })),
+  );
+  return { ok: true, files };
+}
+
 async function methodHover(params) {
   const page = await getPage(params.target_id);
   const selector = params.selector;
@@ -373,7 +396,15 @@ async function methodWaitFor(params) {
 async function methodPdf(params) {
   const page = await getPage(params.target_id);
   const buf = await page.pdf();
-  return { pdf_base64: buf.toString("base64") };
+  // Return the source URL too: MCP embedded resources require a `uri`, and
+  // the page address is the most meaningful identifier for the rendered PDF.
+  let url = "";
+  try {
+    url = page.url();
+  } catch {
+    // Page may have closed during rendering; the PDF bytes are still good.
+  }
+  return { pdf_base64: buf.toString("base64"), url };
 }
 
 async function methodForgetTarget(params) {
@@ -387,6 +418,7 @@ const METHODS = {
   snapshot: methodSnapshot,
   click: methodClick,
   type: methodType,
+  set_input_files: methodSetInputFiles,
   hover: methodHover,
   drag: methodDrag,
   press_key: methodPressKey,
