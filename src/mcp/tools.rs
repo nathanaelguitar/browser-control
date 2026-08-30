@@ -85,6 +85,7 @@ pub fn register_all(registry: &ToolRegistry) {
     registry.register(make_snapshot());
     registry.register(make_click());
     registry.register(make_type());
+    registry.register(make_select_option());
     registry.register(make_set_input_files());
     registry.register(make_hover());
     registry.register(make_drag());
@@ -1687,6 +1688,36 @@ fn make_type() -> RegisteredTool {
     .build()
 }
 
+fn make_select_option() -> RegisteredTool {
+    SidecarTool {
+        name: "browser_select_option".into(),
+        description: "Commit an option in a native select or ARIA combobox and verify that the selection persisted. \
+                      Use this for every dropdown/combobox; do not use browser_type to fill a dropdown. \
+                      The tool clicks the real option and fails rather than claiming success if the form value was not retained. Chromium-only."
+            .into(),
+        method: "select_option",
+        params: vec![
+            SidecarParam {
+                name: "selector",
+                schema: json!({"type": "string", "description": "CSS selector for the select or combobox control."}),
+                required: true,
+            },
+            SidecarParam {
+                name: "option",
+                schema: json!({"type": "string", "description": "Exact visible option label (or native option value)."}),
+                required: true,
+            },
+            SidecarParam {
+                name: "timeout_ms",
+                schema: json!({"type": "integer", "minimum": 0}),
+                required: false,
+            },
+        ],
+        success: "option selected and verified",
+    }
+    .build()
+}
+
 fn make_set_input_files() -> RegisteredTool {
     let extra = json!({
         "selector": {
@@ -1903,6 +1934,7 @@ mod tests {
         "browser_snapshot",
         "browser_click",
         "browser_type",
+        "browser_select_option",
         "browser_set_input_files",
         "browser_hover",
         "browser_drag",

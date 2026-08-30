@@ -327,6 +327,61 @@ async function methodType(params) {
   return { ok: true };
 }
 
+// Commit a value in either a native <select> or an ARIA combobox.  Filling a
+// combobox input is deliberately not enough: React form libraries commonly
+// display that text while leaving the submitted value unset.  This operation
+// always clicks the actual option and then reads the control back, so callers
+// get an error instead of a false-positive "selected" result.
+async function methodSelectOption(params) {
+  const page = await getPage(params.target_id);
+  const selector = params.selector;
+  const option = params.option;
+  if (!selector) throw new Error("missing 'selector'");
+  if (!option) throw new Error("missing 'option'");
+
+  const control = page.locator(selector);
+  const opts = {};
+  if (params.timeout_ms !== undefined) opts.timeout = params.timeout_ms;
+  const tagName = await control.evaluate((node) => node.tagName.toLowerCase());
+
+  if (tagName === "select") {
+    const selected = await control.selectOption({ label: option }, opts);
+    if (selected.length === 0) {
+      await control.selectOption({ value: option }, opts);
+    }
+  } else {
+    await control.click(opts);
+    const candidate = page.getByRole("option", { name: option, exact: true });
+    const count = await candidate.count();
+    if (count !== 1) {
+      throw new Error(
+        `combobox option ${JSON.stringify(option)} matched ${count} options; refresh browser_snapshot and use the exact visible option name`,
+      );
+    }
+    await candidate.click(opts);
+  }
+
+  const committed = await control.evaluate((node) => {
+    const input = /** @type {HTMLInputElement | HTMLSelectElement} */ (node);
+    return {
+      value: "value" in input ? String(input.value || "") : "",
+      text: (node.innerText || node.textContent || "").trim().replace(/\s+/g, " "),
+      ariaValueText: node.getAttribute("aria-valuetext") || "",
+      ariaLabel: node.getAttribute("aria-label") || "",
+    };
+  });
+  const normalizedOption = option.trim().toLocaleLowerCase();
+  const observed = [committed.value, committed.text, committed.ariaValueText, committed.ariaLabel]
+    .join(" ")
+    .toLocaleLowerCase();
+  if (!observed.includes(normalizedOption)) {
+    throw new Error(
+      `option ${JSON.stringify(option)} was clicked but did not persist in ${selector}; observed ${JSON.stringify(committed)}. Do not continue until it is selected.`,
+    );
+  }
+  return { ok: true, option, committed };
+}
+
 async function methodSetInputFiles(params) {
   const page = await getPage(params.target_id);
   const selector = params.selector;
@@ -418,6 +473,7 @@ const METHODS = {
   snapshot: methodSnapshot,
   click: methodClick,
   type: methodType,
+  select_option: methodSelectOption,
   set_input_files: methodSetInputFiles,
   hover: methodHover,
   drag: methodDrag,
