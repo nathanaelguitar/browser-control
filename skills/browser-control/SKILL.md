@@ -79,6 +79,14 @@ Use the highest-level browser-control primitive available:
 
 - Use MCP `browser_click` or CLI `browser-control click`; never hand-write
   JavaScript to click an element.
+- For every dropdown, select, or combobox, use MCP
+  `browser_select_option` with the control selector and exact visible option
+  label. Do not use `browser_type` to fill a dropdown: typed text can appear
+  selected while React leaves the submitted form value empty.
+- Treat a dropdown as complete only when `browser_select_option` reports that
+  the value was committed. If verification fails, capture a fresh
+  `browser_snapshot` and retry with the exact option label; do not continue to
+  later fields or submit the form.
 - Preferred MCP flow: call `browser_snapshot`, then pass the exact
   accessible name and role, e.g.
   `browser_click({"element":"Sign in","role":"button"})`.
