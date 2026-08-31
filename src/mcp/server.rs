@@ -349,6 +349,9 @@ impl ServerState {
     /// recover-on-failure semantics should structure their op around the
     /// returned `(backend, target_id)` — full `with_named_tab_recovery`
     /// can't run from a `Send` MCP future because `Registry` is `!Send`.
+    /// The reserved names `default` and `active` are aliases for the server's
+    /// current tab. This keeps model-generated calls resilient when a model
+    /// uses the common `default` label instead of first selecting a named tab.
     ///
     /// For the URL-regex path, probe-and-iterate via the live targets
     /// snapshot. Surfaces `SessionError::TabHung` if every match is
@@ -361,6 +364,7 @@ impl ServerState {
             .map(String::from);
         match (tab, target) {
             (Some(_), Some(_)) => Err(anyhow::anyhow!("`tab` and `target` are mutually exclusive")),
+            (Some(name), None) if name == "default" || name == "active" => self.current_tab().await,
             (Some(name), None) => {
                 let backend = self.ensure_backend().await?;
                 let browser_name = self.registered_browser_name().await?;
@@ -1292,6 +1296,25 @@ mod tests {
         assert_eq!(target_id, "T1");
 
         std::env::remove_var("BROWSER_CONTROL_DATA_DIR");
+    }
+
+    #[tokio::test]
+    async fn resolve_reserved_default_alias_uses_current_tab() {
+        let (url, _conns, _stop) = spawn_counting_cdp_mock(vec!["T1".into()]).await;
+        let state = ServerState::new(ResolvedBrowser {
+            endpoint: url,
+            engine: Engine::Cdp,
+            source: Source::External,
+        });
+        *state.active_target_id.lock().await = Some("T1".into());
+
+        for alias in ["default", "active"] {
+            let (_backend, target_id) = state
+                .resolve_target_for_args(&json!({"tab": alias}))
+                .await
+                .unwrap_or_else(|e| panic!("{alias} alias should resolve: {e:#}"));
+            assert_eq!(target_id, "T1", "for {alias}");
+        }
     }
 
     // See note above: ENV_LOCK is intentionally held across awaits.
