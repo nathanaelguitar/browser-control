@@ -125,7 +125,7 @@ fn tab_args_schema() -> Value {
     json!({
         "tab": {
             "type": "string",
-            "description": "Optional named tab; mutually exclusive with `target`."
+            "description": "Optional named tab (for example `app`); pass the name returned by browser_tab_list. `default` and `active` address the current tab. Mutually exclusive with `target`."
         },
         "target": {
             "type": "string",
@@ -1632,7 +1632,8 @@ fn make_click() -> RegisteredTool {
         description: "Primary click primitive. Do not use browser_eval/JavaScript for clicks. \
                       Prefer `element` + `role` copied from browser_snapshot (for example, \
                       element=`Sign in`, role=`button`). For unique visible text, `element` \
-                      alone works. Use `selector` only as a fallback. Ambiguous matches fail \
+                      alone works; labels and button ancestors are promoted automatically for \
+                      custom forms. Use `selector` only as a fallback. Ambiguous matches fail \
                       instead of guessing. Chromium-only."
             .into(),
         input_schema: json!({
@@ -1657,7 +1658,9 @@ fn make_click() -> RegisteredTool {
 fn make_type() -> RegisteredTool {
     SidecarTool {
         name: "browser_type",
-        description: "Type text into an input matched by CSS selector. \
+        description: "Type text into an input matched by CSS selector. On label-backed React \
+                      forms, generated controls can also be recovered from selectors like \
+                      `input[name=\"Sex\"]` using the associated label/id. \
                       `press_sequentially=true` simulates keystrokes; default uses fast `fill`. \
                       Chromium-only.",
         method: "type",
