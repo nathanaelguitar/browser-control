@@ -259,6 +259,27 @@ async function resolveClickLocator(page, params) {
   // click handlers on ordinary elements). Visible text is a safe last semantic
   // fallback as long as the result is unique.
   const textLocator = page.getByText(element, { exact });
+  // Lockheed Martin's form (and several other React forms) renders a radio
+  // label as a <span> over a readonly <input>. Clicking the span directly
+  // times out because the input or its label intercepts the pointer event.
+  // Promote text targets to the nearest real activation element before the
+  // caller invokes Playwright's actionability checks.
+  for (const ancestor of [
+    "xpath=ancestor-or-self::label[1]",
+    "xpath=ancestor-or-self::button[1]",
+    "xpath=ancestor-or-self::a[1]",
+    "xpath=ancestor-or-self::*[@role='button' or @role='radio'][1]",
+  ]) {
+    const candidate = textLocator.locator(ancestor);
+    if (await candidate.count() === 1) {
+      return {
+        locator: candidate,
+        strategy: "text-ancestor",
+        element,
+        exact,
+      };
+    }
+  }
   return {
     locator: await requireUnique(
       textLocator,
@@ -269,6 +290,61 @@ async function resolveClickLocator(page, params) {
     element,
     exact,
   };
+}
+
+/**
+ * Resolve the common `input[name="Label"]` selectors emitted by weaker
+ * agents against forms whose controls have generated ids and a separate
+ * <label for="…"> element. The original selector remains the preferred
+ * path; this is a narrowly-scoped recovery path for those forms.
+ */
+async function resolveTypeLocator(page, selector) {
+  const direct = page.locator(selector);
+  if (await direct.count() > 0) return direct;
+
+  const match = selector.match(/^(?:input|textarea|select)\[name=(['"])(.*?)\1\]$/);
+  if (!match) return direct;
+  const labelText = match[2].trim();
+
+  try {
+    const byLabel = page.getByLabel(labelText, { exact: true });
+    if (await byLabel.count() === 1) return byLabel;
+  } catch {
+    // Fall through to the explicit label/id and fuzzy-id recovery paths.
+  }
+
+  const labelledId = await page.locator("label").evaluateAll((labels, text) => {
+    const wanted = String(text).trim().toLocaleLowerCase();
+    const exact = labels.filter((label) =>
+      (label.textContent || "").trim().replace(/\s+/g, " ").toLocaleLowerCase() === wanted,
+    );
+    return exact.length === 1 ? exact[0].htmlFor || null : null;
+  }, labelText);
+  if (labelledId) {
+    const escaped = labelledId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const byId = page.locator(`[id="${escaped}"]`);
+    if (await byId.count() === 1) return byId;
+  }
+
+  // Last resort for names such as "Race/Ethnicity Origin" where the form's
+  // human label is a longer sentence but its generated id contains `race`.
+  const fuzzyId = await page.evaluate((hint) => {
+    const words = hint.toLocaleLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+    const controls = [...document.querySelectorAll("input, textarea, select")];
+    const scored = controls.map((control) => {
+      const id = (control.id || "").toLocaleLowerCase();
+      const label = control.id
+        ? document.querySelector(`label[for="${CSS.escape(control.id)}"]`)
+        : null;
+      const text = (label?.textContent || "").toLocaleLowerCase();
+      const score = words.reduce((sum, word) => sum + (id.includes(word) || text.includes(word) ? 1 : 0), 0);
+      return { id: control.id, score };
+    }).filter((item) => item.id && item.score > 0).sort((a, b) => b.score - a.score);
+    if (scored.length === 0) return null;
+    const best = scored[0];
+    return scored.filter((item) => item.score === best.score).length === 1 ? best.id : null;
+  }, labelText);
+  return fuzzyId ? page.locator(`[id="${fuzzyId.replace(/"/g, '\\"')}"]`) : direct;
 }
 
 async function methodClick(params) {
@@ -285,10 +361,35 @@ async function methodClick(params) {
     aria_label: node.getAttribute("aria-label"),
   }));
 
-  if (params.double_click) {
-    await resolved.locator.dblclick(opts);
-  } else {
-    await resolved.locator.click(opts);
+  // Keep sticky headers/footers from covering the target after Playwright's
+  // minimal scroll. This matters on long Eightfold/Lockheed forms where the
+  // radio label is technically visible but sits underneath a fixed footer.
+  await resolved.locator.evaluate((node) => {
+    node.scrollIntoView({ block: "center", inline: "nearest" });
+  });
+
+  try {
+    if (params.double_click) {
+      await resolved.locator.dblclick(opts);
+    } else {
+      await resolved.locator.click(opts);
+    }
+  } catch (error) {
+    // Some custom forms intentionally layer a readonly input over its label,
+    // or retain a fixed overlay during a state transition. Once the target
+    // was resolved uniquely, retrying with Playwright's force option is the
+    // safe recovery; it still dispatches a real Playwright pointer action and
+    // avoids silently clicking an ambiguous element.
+    const message = String(error?.message || error);
+    if (!/intercepts pointer events|subtree intercepts|Timeout .*exceeded/i.test(message)) {
+      throw error;
+    }
+    const forced = { ...opts, force: true };
+    if (params.double_click) {
+      await resolved.locator.dblclick(forced);
+    } else {
+      await resolved.locator.click(forced);
+    }
   }
 
   let title = "";
@@ -316,13 +417,19 @@ async function methodType(params) {
   const text = params.text;
   if (!selector) throw new Error("missing 'selector'");
   if (text === undefined) throw new Error("missing 'text'");
+  const locator = await resolveTypeLocator(page, selector);
+  if (await locator.count() === 0) {
+    throw new Error(
+      `no input matched ${JSON.stringify(selector)}; use the exact control id from browser_snapshot or its associated label`,
+    );
+  }
   const opts = {};
   if (params.timeout_ms !== undefined) opts.timeout = params.timeout_ms;
   // Use `fill` for typical input fields; `pressSequentially` if simulating keystrokes.
   if (params.press_sequentially) {
-    await page.locator(selector).pressSequentially(text, opts);
+    await locator.pressSequentially(text, opts);
   } else {
-    await page.locator(selector).fill(text, opts);
+    await locator.fill(text, opts);
   }
   return { ok: true };
 }
