@@ -457,7 +457,7 @@ fn make_curl() -> RegisteredTool {
     RegisteredTool {
         name: "browser_curl".into(),
         description: format!(
-            "Run the real curl out of page context with cookies and User-Agent copied from the active browser, plus Origin and Referer derived from the selected source tab. Arguments use ordinary curl syntax and are forwarded unchanged. Omit `-o` to return up to {} MiB through MCP; use `-o <path>`/`--output <path>` for unrestricted streaming downloads. Unlike browser_fetch, curl is not subject to browser CORS/CSP and does not reproduce the browser TLS fingerprint.",
+            "Run the real curl out of page context with cookies and User-Agent copied from the active browser, plus Origin and Referer derived from the selected source tab. Arguments use ordinary curl syntax and are forwarded unchanged. Ordinary successful HTML responses are returned as a bounded readable page summary (title, URL/status, headings, links, lists, and visible text) so raw markup does not flood the model context. Use `browser_snapshot` for normal page interaction, `browser_fetch` for authenticated APIs, and `-o <path>`/`--output <path>` when you explicitly need the full response or an unrestricted download. Non-HTML text remains direct MCP text, and explicit header/write-out/raw output flags preserve curl's original stream. Unlike browser_fetch, curl is not subject to browser CORS/CSP and does not reproduce the browser TLS fingerprint. MCP body responses remain capped at {} MiB.",
             crate::cli::curl::MCP_RESPONSE_LIMIT / (1024 * 1024)
         ),
         input_schema: json!({
@@ -1693,11 +1693,10 @@ fn make_type() -> RegisteredTool {
 
 fn make_select_option() -> RegisteredTool {
     SidecarTool {
-        name: "browser_select_option".into(),
+        name: "browser_select_option",
         description: "Commit an option in a native select or ARIA combobox and verify that the selection persisted. \
                       Use this for every dropdown/combobox; do not use browser_type to fill a dropdown. \
-                      The tool clicks the real option and fails rather than claiming success if the form value was not retained. Chromium-only."
-            .into(),
+                      The tool clicks the real option and fails rather than claiming success if the form value was not retained. Chromium-only.",
         method: "select_option",
         params: vec![
             SidecarParam {
