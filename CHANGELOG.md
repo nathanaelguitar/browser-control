@@ -4,6 +4,33 @@
 
 ### Added
 
+- Obscura (https://github.com/h4ckf0r0day/obscura), a headless Rust/V8 CDP
+  engine, is a first-class browser kind: `start obscura`, `-b obscura`,
+  `list-installed`, named tabs and every engine-agnostic tool. Discovery uses
+  `BROWSER_CONTROL_OBSCURA`, then `PATH`, then `<data dir>/bin/obscura`.
+  Obscura runs behind an `obscura-supervisor` that multiplexes one upstream
+  CDP connection (Obscura scopes pages to the connection that created them),
+  dismisses JavaScript dialogs instead of auto-accepting them, and stops
+  Obscura gracefully on SIGTERM. See `docs/obscura.md`.
+- `browser-control set mcp-default <browser|inherit>` and
+  `BROWSER_CONTROL_MCP_DEFAULT` choose the browser the MCP server prefers over
+  `default`. The Canopy extension manifest sets it to `obscura`; when Obscura
+  is missing or fails to start, the MCP server logs why and falls back to the
+  regular default.
+- On Obscura, `browser_show`, `browser_hover` and `browser_drag` fail with a
+  "not supported by the obscura browser" error that points at
+  `browser_select chrome`, and other Playwright-sidecar failures carry the
+  same hint.
+
+### Fixed
+
+- `browser_select_option` resolves the visible label to a value in the page
+  before selecting, so it works on engines without `HTMLOptionElement.label`.
+- `browser_set_input_files` falls back to CDP `DOM.setFileInputFiles` when the
+  page has no `DataTransfer`.
+- Sidecar tools wait up to 2 s for Playwright to attach a tab the native
+  backend just created.
+
 - `browser-control click` provides a first-class Playwright-backed CLI click
   with accessible role/name targeting, unique visible-text inference, selector
   fallback, named-tab or URL-regex routing, double-click/right-click/modifier

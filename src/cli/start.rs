@@ -47,27 +47,32 @@ pub async fn ensure_started(
     wait_timeout: u64,
 ) -> Result<StartResult> {
     let installed = detect::list_installed();
-    if installed.is_empty() {
+    if installed.is_empty() && browser.as_deref().and_then(Kind::parse) != Some(Kind::Obscura) {
         anyhow::bail!("no supported browsers installed; run `browser-control list-installed`");
     }
 
     let resolved_kind: Kind = match browser.as_deref() {
         None => first_chromium_or_first(&installed)
             .ok_or_else(|| anyhow!("no chromium-based browser installed"))?,
-        Some(s) => Kind::parse(s).ok_or_else(|| {
-            anyhow!("unknown browser kind `{s}`; valid: chrome, edge, chromium, brave, firefox")
-        })?,
+        Some(s) => Kind::parse(s)
+            .ok_or_else(|| anyhow!("unknown browser kind `{s}`; valid: {}", Kind::valid_names()))?,
     };
+    // Obscura has no windowed mode.
+    let headless = headless || resolved_kind.is_headless_only();
 
     let installed_match = installed
         .iter()
         .find(|i| i.kind == resolved_kind)
         .cloned()
         .ok_or_else(|| {
-            anyhow!(
-                "browser `{}` is not installed on this machine",
-                resolved_kind.as_str()
-            )
+            if resolved_kind == Kind::Obscura {
+                anyhow!(crate::detect::obscura::missing_message())
+            } else {
+                anyhow!(
+                    "browser `{}` is not installed on this machine",
+                    resolved_kind.as_str()
+                )
+            }
         })?;
 
     let registry = Registry::open()?;

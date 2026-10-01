@@ -50,7 +50,22 @@ function err(id, message) {
 // Find a page by CDP target id. Probes pages we haven't seen yet by
 // asking each unmapped page for its own target info via a transient
 // CDP session. Caches once found.
+// Find a page by CDP target id, waiting briefly for Playwright to finish
+// attaching a target the native backend created moments ago (behind the
+// Obscura multiplexer the attach event can trail the createTarget reply).
 async function getPage(targetId) {
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    try {
+      return await findPage(targetId);
+    } catch (e) {
+      if (Date.now() >= deadline || !String(e?.message).startsWith("page not found")) throw e;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
+
+async function findPage(targetId) {
   if (pagesByTargetId.has(targetId)) {
     return pagesByTargetId.get(targetId);
   }
@@ -452,10 +467,21 @@ async function methodSelectOption(params) {
   const tagName = await control.evaluate((node) => node.tagName.toLowerCase());
 
   if (tagName === "select") {
-    const selected = await control.selectOption({ label: option }, opts);
-    if (selected.length === 0) {
-      await control.selectOption({ value: option }, opts);
+    // Resolve the visible label to a value in the page first. Playwright's
+    // label matching reads HTMLOptionElement.label, which some engines
+    // (Obscura) leave null; `label || text` is what users see.
+    const value = await control.evaluate((node, wanted) => {
+      const norm = (s) => String(s ?? "").trim().replace(/\s+/g, " ");
+      const opts = [...node.options];
+      const byLabel = opts.find((o) => norm(o.label || o.text || o.textContent) === norm(wanted));
+      if (byLabel) return byLabel.value;
+      const byValue = opts.find((o) => o.value === wanted);
+      return byValue ? byValue.value : null;
+    }, option);
+    if (value === null) {
+      throw new Error(`option ${JSON.stringify(option)} not found in ${selector}; use the exact visible option label or value`);
     }
+    await control.selectOption({ value }, opts);
   } else {
     await control.click(opts);
     const candidate = page.getByRole("option", { name: option, exact: true });
@@ -504,11 +530,42 @@ async function methodSetInputFiles(params) {
   }
   const opts = {};
   if (params.timeout_ms !== undefined) opts.timeout = params.timeout_ms;
-  await page.locator(selector).setInputFiles(list, opts);
+  try {
+    await page.locator(selector).setInputFiles(list, opts);
+  } catch (e) {
+    // Engines without DataTransfer (Obscura) cannot take Playwright's
+    // in-page path; fall back to CDP DOM.setFileInputFiles on the element.
+    if (!/DataTransfer is not defined/.test(String(e?.message))) throw e;
+    await setInputFilesViaCdp(page, selector, list);
+  }
   const files = await page.locator(selector).evaluate((el) =>
     [...el.files].map((f) => ({ name: f.name, size: f.size })),
   );
   return { ok: true, files };
+}
+
+async function setInputFilesViaCdp(page, selector, files) {
+  const marker = `bc-files-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await page.locator(selector).evaluate((el, m) => el.setAttribute("data-browser-control-files", m), marker);
+  const session = await context.newCDPSession(page);
+  try {
+    const { result } = await session.send("Runtime.evaluate", {
+      expression: `document.querySelector('[data-browser-control-files="${marker}"]')`,
+    });
+    if (!result?.objectId) throw new Error(`file input ${selector} not found for CDP fallback`);
+    await session.send("DOM.setFileInputFiles", { objectId: result.objectId, files });
+  } finally {
+    try {
+      await page.locator(selector).evaluate((el) => el.removeAttribute("data-browser-control-files"));
+    } catch {
+      /* ignore */
+    }
+    try {
+      await session.detach();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 async function methodHover(params) {

@@ -29,7 +29,7 @@ enum Command {
     },
     /// Start a browser and register it.
     Start {
-        /// Browser kind (chrome, edge, chromium, brave, firefox) or friendly name.
+        /// Browser kind (chrome, edge, chromium, brave, firefox, obscura) or friendly name.
         browser: Option<String>,
         #[arg(long)]
         headless: bool,
@@ -264,6 +264,20 @@ enum Command {
         #[command(subcommand)]
         cmd: browser_control::cli::tab::TabCmd,
     },
+    /// Internal: run `obscura serve` behind the CDP multiplexer. Started by
+    /// `start obscura`; not meant to be invoked by hand.
+    #[command(hide = true)]
+    ObscuraSupervisor {
+        /// Path to the `obscura` binary.
+        #[arg(long)]
+        obscura: std::path::PathBuf,
+        /// Public loopback port to serve CDP on.
+        #[arg(long)]
+        port: u16,
+        /// browser-control profile directory (storage lives under it).
+        #[arg(long)]
+        profile_dir: std::path::PathBuf,
+    },
 }
 
 fn init_tracing() {
@@ -409,5 +423,19 @@ async fn main() -> Result<()> {
             .await
         }
         Command::Tab { cmd } => browser_control::cli::tab::run(cmd).await,
+        Command::ObscuraSupervisor {
+            obscura,
+            port,
+            profile_dir,
+        } => {
+            browser_control::obscura::supervisor::run(
+                browser_control::obscura::supervisor::SupervisorOpts {
+                    obscura,
+                    port,
+                    profile_dir,
+                },
+            )
+            .await
+        }
     }
 }

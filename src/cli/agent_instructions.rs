@@ -10,9 +10,10 @@ Use the highest-level browser-control primitive available.
 
 Browser selection
 - Select a browser with `browser_select` in MCP, or with CLI `-b/--browser`, `$BROWSER_CONTROL`, or `browser-control set default <selector>`.
-- Selectors may be a kind (`chrome`, `edge`, `chromium`, `brave`, `firefox`), a friendly name from `list-running`, an absolute executable path, or a CDP/BiDi endpoint URL.
+- Selectors may be a kind (`chrome`, `edge`, `chromium`, `brave`, `firefox`, `obscura`), a friendly name from `list-running`, an absolute executable path, or a CDP/BiDi endpoint URL.
 - If nothing is running, use `browser-control start <kind>`. It reuses a persistent per-kind profile so login state survives.
 - Browser windows and automated tabs stay in the background by default. Reveal the browser only when human interaction is needed: use MCP `browser_show` or CLI `browser-control show -b <browser>`.
+- `obscura` is a headless engine (the MCP default under Canopy Code when installed). It has no window and lacks hover events, HTML5 drag and drop, iframe locators and some web APIs. When a tool reports it is not supported by obscura, when a human must log in, or when a page renders incorrectly, switch with `browser_select` `chrome`; cookies and tabs are not shared between browsers.
 
 Tabs
 - Prefer tab primitives over target IDs:

@@ -164,6 +164,26 @@ impl ServerState {
         self.browser.read().await.clone()
     }
 
+    /// Kind of the active registered browser (`None` for external URL
+    /// endpoints). Uses the registry row, falling back to the kind prefix of
+    /// a generated name such as `obscura-fern`.
+    pub async fn active_kind(&self) -> Option<crate::detect::Kind> {
+        use crate::cli::env_resolver::Source;
+        let Source::Registered { name } = self.browser_snapshot().await.source else {
+            return None;
+        };
+        let lookup = name.clone();
+        let from_registry =
+            sync_registry_op(move |reg| Ok(reg.get_by_name(&lookup)?.map(|r| r.kind)))
+                .await
+                .ok()
+                .flatten();
+        from_registry.or_else(|| {
+            name.split_once('-')
+                .and_then(|(prefix, _)| crate::detect::Kind::parse(prefix))
+        })
+    }
+
     /// Ensure the BiDi single-session lock is held (if applicable).
     /// Lazy + idempotent: called by each tool handler before opening a
     /// BiDi session, returns immediately on second+ calls.

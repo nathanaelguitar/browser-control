@@ -178,14 +178,28 @@ impl Registry {
     }
 
     /// All rows, no liveness check, ordered by started_at DESC.
+    ///
+    /// Rows this binary cannot decode (for example a browser kind added by a
+    /// newer browser-control sharing the same registry) are skipped with a
+    /// warning instead of failing every listing.
     pub fn list_all(&self) -> Result<Vec<BrowserRow>> {
-        db::query_vec(
+        let rows = db::query_vec(
             &self.conn,
             "SELECT name, kind, engine, pid, endpoint, port, profile_dir, executable, headless, started_at
              FROM browsers ORDER BY started_at DESC",
             [],
-            row_from_sqlite,
-        )
+            |r| Ok(row_from_sqlite(r)),
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match row {
+                Ok(row) => Some(row),
+                Err(e) => {
+                    tracing::warn!(target = "registry", error = %e, "skipping unreadable registry row");
+                    None
+                }
+            })
+            .collect())
     }
 
     /// All rows of a given kind ordered by started_at DESC, without liveness check.
@@ -441,6 +455,23 @@ mod tests {
         let got = reg.get_by_name("alpha-bravo").unwrap().unwrap();
         assert_eq!(got, row);
         assert!(reg.get_by_name("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn list_all_skips_rows_with_unknown_kind() {
+        let reg = Registry::open_in_memory().unwrap();
+        reg.insert(&sample_row("a", Kind::Chrome, 9001, "2024-01-01T00:00:00Z"))
+            .unwrap();
+        reg.conn
+            .execute(
+                "INSERT INTO browsers (name, kind, engine, pid, endpoint, port, profile_dir, executable, headless, started_at)
+                 VALUES ('future-x', 'netscape', 'cdp', 1, 'ws://127.0.0.1:1/', 1, '/p', '/e', 1, '2024-01-02T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let rows = reg.list_all().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "a");
     }
 
     #[test]

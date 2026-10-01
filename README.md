@@ -95,8 +95,10 @@ browser-control list-installed
 browser-control list-installed --json
 ```
 
-Supported kinds: `chrome`, `edge`, `chromium`, `brave` (CDP), and `firefox`
-(BiDi).
+Supported kinds: `chrome`, `edge`, `chromium`, `brave` (CDP), `firefox`
+(BiDi), and `obscura` (CDP, headless only; see [Obscura](docs/obscura.md)).
+Obscura is found through `BROWSER_CONTROL_OBSCURA`, then `PATH`, then
+`<data dir>/bin/obscura`; browser-control never downloads it.
 
 ### `list-running`
 
@@ -173,8 +175,14 @@ browser-control mcp --playwright-version 1.55    # pin a custom playwright-core
 Browser resolution order:
 
 1. The `--browser` / `-b` flag (or `BROWSER_CONTROL` env, merged by clap; the flag wins when both are present)
-2. The persisted default from `browser-control set default <value>`
-3. Otherwise, exit with an error
+2. The MCP preference: `browser-control set mcp-default <value>`, else the
+   `BROWSER_CONTROL_MCP_DEFAULT` env var (the Canopy extension sets it to
+   `obscura`). A live browser of that kind is reused or one is started; if that
+   fails (for example Obscura is not installed) the reason goes to stderr and
+   resolution continues below. `mcp-default inherit` turns this step off.
+3. The persisted default from `browser-control set default <value>`
+4. The most recently started live browser, otherwise the first installed
+   Chromium-family browser is started
 
 The server exposes engine-agnostic tools (`browser_navigate`, `browser_get_html`,
 `browser_eval`, `browser_fetch`, `browser_curl`, `browser_take_screenshot`, `browser_storage_get`,
@@ -235,16 +243,24 @@ codex plugin add browser-control@personal
 
 ### `set | get | unset <KEY> [VALUE]`
 
-Manage persistent settings. The only key today is `default`, which selects the
-browser used by `mcp` when no positional argument and no `BROWSER_CONTROL` env
-var is present. Values accept the full `BROWSER_CONTROL` grammar (URL / kind /
-friendly name / absolute path) and are validated at set-time.
+Manage persistent settings. Keys:
+
+- `default` selects the browser used when no positional argument and no
+  `BROWSER_CONTROL` env var is present.
+- `mcp-default` selects the browser the MCP server prefers over `default`
+  (it overrides `BROWSER_CONTROL_MCP_DEFAULT`). Set it to `chrome` to opt out
+  of the Canopy extension's Obscura default, or to `inherit` to fall through
+  to `default`.
+
+Values accept the full `BROWSER_CONTROL` grammar (URL / kind / friendly name /
+absolute path) and are validated at set-time.
 
 ```sh
 browser-control set default firefox
 browser-control set default ws://127.0.0.1:9222/devtools/browser/abc
 browser-control get default
 browser-control unset default
+browser-control set mcp-default chrome     # MCP sessions start on Chrome
 ```
 
 The setting is stored as TOML at:
