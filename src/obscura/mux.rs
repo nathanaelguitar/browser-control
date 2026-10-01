@@ -96,6 +96,8 @@ enum Pending {
         method: String,
         target: Option<String>,
         session: Channel,
+        /// `params.sessionId` of a `Target.detachFromTarget` request.
+        detach: Option<String>,
     },
     Internal(oneshot::Sender<Value>),
 }
@@ -488,8 +490,21 @@ impl Mux {
                 method,
                 target,
                 session,
+                detach,
             }) => {
                 let mut out = msg;
+                // Forget a detached session even if Obscura does not emit
+                // Target.detachedFromTarget for it.
+                if let Some(sid) = detach.filter(|_| out.get("error").is_none()) {
+                    let mut st = self.lock();
+                    if st
+                        .sessions
+                        .get(&sid)
+                        .is_some_and(|s| s.client == Some(client))
+                    {
+                        st.sessions.remove(&sid);
+                    }
+                }
                 out["id"] = client_id;
                 let result = out.get("result").cloned().unwrap_or(Value::Null);
                 if method == "Target.attachToTarget" || method == "Target.attachToBrowserTarget" {
@@ -870,6 +885,14 @@ impl Mux {
         }
         st.next_up_id += 1;
         let up_id = st.next_up_id;
+        let detach = (method == "Target.detachFromTarget")
+            .then(|| {
+                params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .flatten();
         st.pending.insert(
             up_id,
             Pending::Client {
@@ -878,6 +901,7 @@ impl Mux {
                 method,
                 target,
                 session,
+                detach,
             },
         );
         msg["id"] = json!(up_id);
@@ -1106,6 +1130,33 @@ mod tests {
         assert!(b.events("Runtime.consoleAPICalled").is_empty());
         let _ = a.send("Browser.getVersion", json!({}), None).await;
         assert_eq!(a.events("Runtime.consoleAPICalled").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn detach_releases_session_ownership() {
+        let (url, _log) = mux_fixture(None).await;
+        let mut a = TestClient::connect(&url).await;
+        let tid = a.send("Target.createTarget", json!({}), None).await["result"]["targetId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let sid = a
+            .send(
+                "Target.attachToTarget",
+                json!({ "targetId": tid, "flatten": true }),
+                None,
+            )
+            .await["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        a.send("Target.detachFromTarget", json!({ "sessionId": sid }), None)
+            .await;
+        // The fake never emits detachedFromTarget; the session is still gone.
+        let r = a
+            .send("Runtime.evaluate", json!({ "expression": "1" }), Some(&sid))
+            .await;
+        assert!(r.get("error").is_some(), "{r}");
     }
 
     #[tokio::test]
