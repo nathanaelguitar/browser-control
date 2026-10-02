@@ -16,11 +16,21 @@ const HEADER: &str =
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+    /// Browser the MCP server prefers when no explicit `-b`/`BROWSER_CONTROL`
+    /// is given. Overrides `BROWSER_CONTROL_MCP_DEFAULT` (which the Canopy
+    /// extension manifest sets to `obscura`) and is consulted before
+    /// `default`. The value `inherit` disables the preference entirely.
+    #[serde(
+        default,
+        rename = "mcp-default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mcp_default: Option<String>,
 }
 
 impl Config {
     pub fn is_empty(&self) -> bool {
-        self.default.is_none()
+        self.default.is_none() && self.mcp_default.is_none()
     }
 }
 
@@ -90,6 +100,7 @@ mod tests {
         let (_td, p) = tmp_cfg();
         let cfg = Config {
             default: Some("firefox".into()),
+            mcp_default: Some("obscura".into()),
         };
         save_to(&p, &cfg).unwrap();
         let read = load_from(&p).unwrap();
@@ -98,6 +109,7 @@ mod tests {
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.starts_with("# Managed by browser-control"));
         assert!(text.contains("default = \"firefox\""));
+        assert!(text.contains("mcp-default = \"obscura\""));
     }
 
     #[test]
@@ -107,6 +119,7 @@ mod tests {
             &p,
             &Config {
                 default: Some("chrome".into()),
+                ..Config::default()
             },
         )
         .unwrap();

@@ -5,10 +5,11 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::detect::{Engine, Installed};
+use crate::detect::{Engine, Installed, Kind};
 
 pub mod chromium;
 pub mod firefox;
+pub mod obscura;
 
 #[derive(Debug, Clone)]
 pub struct LaunchOpts {
@@ -59,12 +60,14 @@ pub fn allocate_free_port() -> Result<u16> {
     Ok(l.local_addr()?.port())
 }
 
-/// Top-level entry point: dispatches to chromium or firefox based on kind.
+/// Top-level entry point: dispatches to the per-engine launcher by kind.
 pub async fn launch(installed: &Installed, opts: LaunchOpts) -> Result<LaunchedHandle> {
-    if installed.kind.is_chromium() {
-        chromium::launch(installed, opts).await
-    } else {
-        firefox::launch(installed, opts).await
+    match installed.kind {
+        Kind::Obscura => obscura::launch(installed, opts).await,
+        Kind::Firefox => firefox::launch(installed, opts).await,
+        Kind::Chrome | Kind::Edge | Kind::Chromium | Kind::Brave => {
+            chromium::launch(installed, opts).await
+        }
     }
 }
 

@@ -9,6 +9,7 @@ pub mod dom;
 pub mod errors;
 pub mod launch;
 pub mod mcp;
+pub mod obscura;
 pub mod paths;
 pub mod registry;
 pub mod session;

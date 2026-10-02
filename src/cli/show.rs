@@ -28,6 +28,18 @@ pub async fn run(browser: Option<String>, json: bool) -> Result<()> {
         Source::External => "<external>".to_string(),
     };
 
+    if let Source::Registered { name } = &resolved.source {
+        if let Some(row) = registry.get_by_name(name)? {
+            if row.kind.is_headless_only() {
+                anyhow::bail!(
+                    "`show` is not supported by {}: {} is a headless engine with no window. \
+                     Take a screenshot instead, or use `-b chrome` for a browser a human can see.",
+                    row.name,
+                    row.kind
+                );
+            }
+        }
+    }
     let _bidi_lock = acquire_bidi_lock_if_needed(&registry, &resolved)?;
     let backend = open_backend(&resolved.endpoint, resolved.engine).await?;
     let target_id = backend.target_for_show().await?;

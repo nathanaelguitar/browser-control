@@ -37,6 +37,8 @@ fn candidates_for(kind: Kind) -> &'static [Cand<'static>] {
             Cand::Abs("/usr/bin/firefox"),
             Cand::Abs("/snap/bin/firefox"),
         ],
+        // Discovered cross-platform by `detect::obscura`.
+        Kind::Obscura => &[],
     }
 }
 

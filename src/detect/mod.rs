@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod obscura;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
@@ -18,6 +19,12 @@ pub enum Kind {
     Chromium,
     Brave,
     Firefox,
+    /// Obscura (https://github.com/h4ckf0r0day/obscura): a headless-only
+    /// Rust/V8 engine that speaks CDP. browser-control runs it behind a
+    /// supervisor that multiplexes one upstream CDP connection (see
+    /// [`crate::obscura`]) because Obscura scopes targets to the connection
+    /// that created them.
+    Obscura,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +57,7 @@ impl Kind {
             Kind::Chromium => "chromium",
             Kind::Brave => "brave",
             Kind::Firefox => "firefox",
+            Kind::Obscura => "obscura",
         }
     }
 
@@ -60,12 +68,40 @@ impl Kind {
             "chromium" => Some(Kind::Chromium),
             "brave" => Some(Kind::Brave),
             "firefox" => Some(Kind::Firefox),
+            "obscura" => Some(Kind::Obscura),
             _ => None,
         }
     }
 
+    /// Real Chromium-family browsers (Chrome, Edge, Chromium, Brave).
+    /// Obscura speaks CDP but is not Chromium: it has no window, its own
+    /// launcher, and a partial web platform.
     pub fn is_chromium(self) -> bool {
-        !matches!(self, Kind::Firefox)
+        !matches!(self, Kind::Firefox | Kind::Obscura)
+    }
+
+    /// Engines that never open a window (`show` has nothing to reveal).
+    pub fn is_headless_only(self) -> bool {
+        matches!(self, Kind::Obscura)
+    }
+
+    /// Every supported kind, in detection/display order.
+    pub const ALL: [Kind; 6] = [
+        Kind::Chrome,
+        Kind::Edge,
+        Kind::Chromium,
+        Kind::Brave,
+        Kind::Firefox,
+        Kind::Obscura,
+    ];
+
+    /// Comma-separated list of valid kind names for error messages.
+    pub fn valid_names() -> String {
+        Kind::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -152,6 +188,18 @@ pub fn list_installed() -> Vec<Installed> {
 }
 
 pub fn list_installed_with<P: Probe>(probe: &P) -> Vec<Installed> {
+    let mut out = platform_installed(probe);
+    if let Some(found) = obscura::detect(
+        probe,
+        obscura::env_override().as_deref(),
+        obscura::managed_path().as_deref(),
+    ) {
+        out.push(found);
+    }
+    out
+}
+
+fn platform_installed<P: Probe>(probe: &P) -> Vec<Installed> {
     #[cfg(target_os = "macos")]
     {
         crate::detect::macos::detect(probe)
@@ -197,13 +245,7 @@ mod tests {
 
     #[test]
     fn kind_parse_roundtrip() {
-        for k in [
-            Kind::Chrome,
-            Kind::Edge,
-            Kind::Chromium,
-            Kind::Brave,
-            Kind::Firefox,
-        ] {
+        for k in Kind::ALL {
             assert_eq!(Kind::parse(k.as_str()), Some(k));
             assert_eq!(k.to_string(), k.as_str());
             assert_eq!(k.as_str().parse::<Kind>().unwrap(), k);
@@ -222,6 +264,12 @@ mod tests {
         assert_eq!(Kind::Brave.engine(), Engine::Cdp);
         assert!(Kind::Chrome.is_chromium());
         assert!(!Kind::Firefox.is_chromium());
+        assert_eq!(Kind::Obscura.engine(), Engine::Cdp);
+        assert!(!Kind::Obscura.is_chromium());
+        assert!(Kind::Obscura.is_headless_only());
+        assert!(!Kind::Chrome.is_headless_only());
+        assert_eq!(Kind::parse("Obscura"), Some(Kind::Obscura));
+        assert!(Kind::valid_names().ends_with("firefox, obscura"));
     }
 
     #[test]

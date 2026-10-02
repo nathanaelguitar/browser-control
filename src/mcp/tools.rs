@@ -529,6 +529,12 @@ fn make_select_element() -> RegisteredTool {
         }),
         handler: handler(|state, args| {
             Box::pin(async move {
+                if let Some(kind) = state.active_kind().await.filter(|k| k.is_headless_only()) {
+                    return Err(anyhow!(
+                        "browser_select_element is not supported by {kind}: the overlay waits for a human click \
+                         and a headless engine has no window. Call browser_select with `chrome`, then browser_show."
+                    ));
+                }
                 let expr = SELECT_ELEMENT_JS.to_string();
                 let (backend, target_id) = state.resolve_target_for_args(&args).await?;
                 // select_element shows an interactive overlay that the
@@ -1102,17 +1108,21 @@ fn make_browser_start() -> RegisteredTool {
         input_schema: json!({
             "type": "object",
             "properties": {
-                "browser": { "type": "string", "description": "Optional browser kind (chrome, edge, chromium, brave, firefox). Defaults to the first installed Chromium-family browser." },
+                "browser": { "type": "string", "description": "Optional browser kind (chrome, edge, chromium, brave, firefox, obscura). Defaults to the MCP preferred browser (`mcp-default` / BROWSER_CONTROL_MCP_DEFAULT, obscura under Canopy) when it is installed, otherwise the first installed Chromium-family browser. Use `chrome` when a task needs a real, visible browser." },
                 "headless": { "type": "boolean", "default": false },
                 "wait_timeout_seconds": { "type": "integer", "default": 30 }
             },
         }),
         handler: handler(|state, args| {
             Box::pin(async move {
-                let browser = args
-                    .get("browser")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                let browser = match args.get("browser").and_then(|v| v.as_str()) {
+                    Some(s) => Some(s.to_string()),
+                    None => tokio::task::spawn_blocking(crate::cli::mcp::preferred_start_kind)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|k| k.as_str().to_string()),
+                };
                 let headless = args
                     .get("headless")
                     .and_then(|v| v.as_bool())
@@ -1248,6 +1258,13 @@ fn make_browser_show() -> RegisteredTool {
         input_schema: json!({"type": "object", "properties": {}}),
         handler: handler(|state, _args| {
             Box::pin(async move {
+                if let Some(kind) = state.active_kind().await.filter(|k| k.is_headless_only()) {
+                    return Err(anyhow!(
+                        "browser_show is not supported by {kind}: it is a headless engine with no window to reveal. \
+                         Use browser_take_screenshot to see the page, or call browser_select with `chrome` \
+                         (cookies and tabs are not shared between browsers) when a human needs to interact."
+                    ));
+                }
                 let backend = state.ensure_backend().await?;
                 let target_id = backend.target_for_show().await?;
                 let resolved = state.browser_snapshot().await;
@@ -1303,6 +1320,15 @@ async fn forward_to_sidecar(
     // spawn the sidecar yet. If Playwright attach fails, we still need a native
     // backend + target id for the wake/probe diagnostic.
     state.ensure_sidecar_supported(tool_name).await?;
+    // Tools Obscura silently no-ops: refuse instead of reporting success.
+    if let Some(gap) = obscura_gap(tool_name) {
+        if state.active_kind().await == Some(crate::detect::Kind::Obscura) {
+            return Err(anyhow!(
+                "{tool_name} is not supported by the obscura browser: {gap}. \
+                 Call browser_select with `chrome` for this step (cookies and tabs are not shared between browsers)."
+            ));
+        }
+    }
     let (backend, target_id) = state.resolve_target_for_args(args).await?;
     params.insert("target_id".into(), Value::String(target_id));
     let sc = match state.ensure_sidecar(tool_name).await {
@@ -1325,6 +1351,9 @@ async fn forward_to_sidecar(
     };
     match sc.call(sidecar_method, Value::Object(params.clone())).await {
         Ok(v) => Ok(v),
+        Err(e) if !looks_like_sidecar_cdp_attach_failure(&e) => {
+            Err(with_engine_hint(state, tool_name, e).await)
+        }
         Err(e) if looks_like_sidecar_cdp_attach_failure(&e) => {
             sidecar_cdp_failure_after_probe(
                 state,
@@ -1341,6 +1370,42 @@ async fn forward_to_sidecar(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Known gaps of the Obscura engine, by sidecar tool. Used to turn a raw
+/// Playwright failure into an actionable "not supported by this browser"
+/// message.
+fn obscura_gap(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "browser_hover" => Some("Obscura moves the pointer but dispatches no mouseover/mouseenter events, so hover menus and tooltips do not open"),
+        "browser_drag" => Some("Obscura has no DataTransfer or drag events, so HTML5 drag and drop does not work"),
+        _ => None,
+    }
+}
+
+/// Append an engine hint to a sidecar failure when the active browser is
+/// Obscura: name the tool, say it may be an engine gap, and point at
+/// `browser_select chrome`.
+async fn with_engine_hint(
+    state: &ServerState,
+    tool_name: &str,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    if state.active_kind().await != Some(crate::detect::Kind::Obscura) {
+        return err;
+    }
+    let known = obscura_gap(tool_name)
+        .map(|g| format!(" Known limitation: {g}."))
+        .unwrap_or_default();
+    let frame_note = if format!("{err:#}").contains("Failed to find frame") {
+        " Obscura does not expose iframes to Playwright frame locators; read same-origin frames with browser_eval via `iframe.contentDocument`."
+    } else {
+        ""
+    };
+    anyhow!(
+        "{err:#}\n\n{tool_name} failed on the headless Obscura engine, which implements only part of the web platform.{known}{frame_note} \
+         If the page works in a real browser, retry after `browser_select` with `chrome` (state such as cookies is not shared between browsers)."
+    )
 }
 
 async fn sidecar_cdp_failure_after_probe(
@@ -2311,6 +2376,14 @@ mod tests {
             }
             other => panic!("expected EngineUnsupported, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn obscura_gap_covers_tools_that_silently_no_op() {
+        assert!(obscura_gap("browser_hover").is_some());
+        assert!(obscura_gap("browser_drag").is_some());
+        assert!(obscura_gap("browser_click").is_none());
+        assert!(obscura_gap("browser_set_input_files").is_none());
     }
 
     #[test]

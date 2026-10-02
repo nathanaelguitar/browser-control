@@ -1,7 +1,11 @@
 //! `set` / `get` / `unset` subcommand handlers.
 //!
-//! Currently the only supported key is `default`, which selects the browser
-//! to use when `BROWSER_CONTROL` is unset and no positional argument is given.
+//! Keys:
+//! * `default`: the browser to use when `BROWSER_CONTROL` is unset and no
+//!   positional argument is given.
+//! * `mcp-default`: the browser the MCP server prefers over `default`
+//!   (overrides `BROWSER_CONTROL_MCP_DEFAULT`, which the Canopy extension sets
+//!   to `obscura`). `inherit` turns the preference off.
 
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
@@ -14,12 +18,17 @@ use crate::config::{self, Config};
 pub enum Key {
     /// Default browser to connect to when `BROWSER_CONTROL` and CLI args are absent.
     Default,
+    /// Browser the MCP server prefers (over `default`) when no explicit
+    /// browser is given. Overrides `BROWSER_CONTROL_MCP_DEFAULT`; `inherit`
+    /// disables the preference.
+    McpDefault,
 }
 
 impl Key {
     pub fn as_str(self) -> &'static str {
         match self {
             Key::Default => "default",
+            Key::McpDefault => "mcp-default",
         }
     }
 }
@@ -108,25 +117,35 @@ pub fn run_unset(key: Key, json: bool) -> Result<()> {
 fn get(key: Key, cfg: &Config) -> Option<String> {
     match key {
         Key::Default => cfg.default.clone(),
+        Key::McpDefault => cfg.mcp_default.clone(),
     }
 }
 
 fn set(key: Key, cfg: &mut Config, value: Option<String>) {
     match key {
         Key::Default => cfg.default = value,
+        Key::McpDefault => cfg.mcp_default = value,
     }
 }
 
 fn take(key: Key, cfg: &mut Config) -> Option<String> {
     match key {
         Key::Default => cfg.default.take(),
+        Key::McpDefault => cfg.mcp_default.take(),
     }
 }
 
 /// Validate `value` against the rules for `key` and return its canonical form.
 fn canonicalize(key: Key, value: &str) -> Result<String> {
     match key {
-        Key::Default => {
+        Key::McpDefault
+            if value
+                .trim()
+                .eq_ignore_ascii_case(crate::cli::mcp::MCP_DEFAULT_INHERIT) =>
+        {
+            Ok(crate::cli::mcp::MCP_DEFAULT_INHERIT.to_string())
+        }
+        Key::Default | Key::McpDefault => {
             let sel = env_resolver::parse(value)?;
             Ok(match sel {
                 BrowserSelector::Url(u) => u.to_string(),
@@ -209,6 +228,26 @@ mod tests {
             run_unset(Key::Default, true).unwrap();
             let cfg = config::load().unwrap();
             assert!(cfg.default.is_none());
+        });
+    }
+
+    #[test]
+    fn set_mcp_default_accepts_kinds_and_inherit() {
+        with_tmp_config(|| {
+            run_set(Key::McpDefault, Some("Chrome".into()), true).unwrap();
+            assert_eq!(
+                config::load().unwrap().mcp_default.as_deref(),
+                Some("chrome")
+            );
+            run_set(Key::McpDefault, Some("INHERIT".into()), true).unwrap();
+            assert_eq!(
+                config::load().unwrap().mcp_default.as_deref(),
+                Some("inherit")
+            );
+            run_unset(Key::McpDefault, true).unwrap();
+            assert!(config::load().unwrap().mcp_default.is_none());
+            // `default` is untouched by mcp-default edits.
+            assert!(config::load().unwrap().default.is_none());
         });
     }
 
