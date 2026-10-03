@@ -1,13 +1,10 @@
 {
   "name": "browser-control",
   "version": "1.2.0",
-  "description": "Default browser automation for Canopy Code: navigate, click, persistently select dropdown options, snapshot, cookies, storage, and authenticated fetch over CDP/BiDi. New sessions use the headless Obscura engine when it is installed (falling back to Chrome/Chromium); `browser_select chrome` switches to a real browser.",
+  "description": "Default browser automation for Canopy Code: navigate, click, persistently select dropdown options, snapshot, cookies, storage, and authenticated fetch via a real browser over CDP/BiDi. Chrome is the default so you can watch it; Obscura (headless, lighter) is available with browser_select obscura.",
   "mcpServers": {
     "browser-control": {
-      "command": "${extensionPath}${/}scripts${/}mcp-wrapper.sh",
-      "env": {
-        "BROWSER_CONTROL_MCP_DEFAULT": "obscura"
-      }
+      "command": "${extensionPath}${/}scripts${/}mcp-wrapper.sh"
     }
   }
 }
