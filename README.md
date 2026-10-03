@@ -528,6 +528,17 @@ tool deliberately fails ambiguous matches rather than selecting the first
 element. See [Reliable clicking](docs/clicking.md) for interaction guidance and
 [docs/session-ops.md](docs/session-ops.md) for the underlying session model.
 
+### Tab policy
+
+Models tend to open a new tab for every page. To curb that, tool descriptions
+steer them to `browser_navigate` on the active tab, and the server enforces a
+`tab-policy` setting: `reuse` (default) makes an unnamed `browser_tab_new`
+navigate the live active tab instead of opening another one (the result says
+so); named tabs (`name`) are unaffected, and a tab is still created when none
+is active. `free` always opens a new tab. Set it with
+`browser-control set tab-policy free`, or override per process with
+`BROWSER_CONTROL_TAB_POLICY=free`.
+
 ```json
 {
   "mcpServers": {

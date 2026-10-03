@@ -6,6 +6,9 @@
 //! * `mcp-default`: the browser the MCP server prefers over `default`
 //!   (overrides `BROWSER_CONTROL_MCP_DEFAULT`, which the Canopy extension sets
 //!   to `obscura`). `inherit` turns the preference off.
+//! * `tab-policy`: `reuse` (default) or `free`. Under `reuse` an unnamed
+//!   `browser_tab_new` navigates the active MCP tab instead of opening
+//!   another. Overridden by `BROWSER_CONTROL_TAB_POLICY`.
 
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
@@ -22,6 +25,10 @@ pub enum Key {
     /// browser is given. Overrides `BROWSER_CONTROL_MCP_DEFAULT`; `inherit`
     /// disables the preference.
     McpDefault,
+    /// MCP tab policy: `reuse` (default) navigates the active tab for an
+    /// unnamed `browser_tab_new`; `free` always opens a new tab. Overridden
+    /// by `BROWSER_CONTROL_TAB_POLICY`.
+    TabPolicy,
 }
 
 impl Key {
@@ -29,6 +36,7 @@ impl Key {
         match self {
             Key::Default => "default",
             Key::McpDefault => "mcp-default",
+            Key::TabPolicy => "tab-policy",
         }
     }
 }
@@ -118,6 +126,7 @@ fn get(key: Key, cfg: &Config) -> Option<String> {
     match key {
         Key::Default => cfg.default.clone(),
         Key::McpDefault => cfg.mcp_default.clone(),
+        Key::TabPolicy => cfg.tab_policy.clone(),
     }
 }
 
@@ -125,6 +134,7 @@ fn set(key: Key, cfg: &mut Config, value: Option<String>) {
     match key {
         Key::Default => cfg.default = value,
         Key::McpDefault => cfg.mcp_default = value,
+        Key::TabPolicy => cfg.tab_policy = value,
     }
 }
 
@@ -132,6 +142,7 @@ fn take(key: Key, cfg: &mut Config) -> Option<String> {
     match key {
         Key::Default => cfg.default.take(),
         Key::McpDefault => cfg.mcp_default.take(),
+        Key::TabPolicy => cfg.tab_policy.take(),
     }
 }
 
@@ -145,6 +156,7 @@ fn canonicalize(key: Key, value: &str) -> Result<String> {
         {
             Ok(crate::cli::mcp::MCP_DEFAULT_INHERIT.to_string())
         }
+        Key::TabPolicy => Ok(config::TabPolicy::parse(value)?.as_str().to_string()),
         Key::Default | Key::McpDefault => {
             let sel = env_resolver::parse(value)?;
             Ok(match sel {
@@ -248,6 +260,18 @@ mod tests {
             assert!(config::load().unwrap().mcp_default.is_none());
             // `default` is untouched by mcp-default edits.
             assert!(config::load().unwrap().default.is_none());
+        });
+    }
+
+    #[test]
+    fn set_tab_policy_validates_and_canonicalizes() {
+        with_tmp_config(|| {
+            run_set(Key::TabPolicy, Some("FREE".into()), true).unwrap();
+            assert_eq!(config::load().unwrap().tab_policy.as_deref(), Some("free"));
+            assert!(run_set(Key::TabPolicy, Some("nope".into()), true).is_err());
+            assert_eq!(config::load().unwrap().tab_policy.as_deref(), Some("free"));
+            run_unset(Key::TabPolicy, true).unwrap();
+            assert!(config::load().unwrap().tab_policy.is_none());
         });
     }
 

@@ -16,10 +16,11 @@ Browser selection
 - `obscura` is a headless engine (the MCP default under Canopy Code when installed). It has no window and lacks hover events, HTML5 drag and drop, iframe locators and some web APIs. When a tool reports it is not supported by obscura, when a human must log in, or when a page renders incorrectly, switch with `browser_select` `chrome`; cookies and tabs are not shared between browsers.
 
 Tabs
+- Reuse the active tab. Go to URLs with `browser_navigate`; open a new tab only when the current page must stay open.
 - Prefer tab primitives over target IDs:
   MCP: `browser_tab_list`, `browser_tab_new`, `browser_tab_select`, `browser_tab_close`.
   CLI: `browser-control tab open <browser>/<name> [url]`, `tab list <browser> --all`, `tab adopt <browser>/<name> <target-id>`.
-- For repeatable work, create or select a named tab, then address it as `<browser>/<tab>` in page-context CLI commands.
+- For durable multi-step workflows (not for every page), create or select a named tab, then address it as `<browser>/<tab>` in page-context CLI commands.
 - Use target IDs only to adopt an existing unnamed tab or as a last-resort diagnostic.
 - Browser-wide operations do not take tab names. Page-context operations do.
 
@@ -50,7 +51,7 @@ MCP server setup
 - Playwright-sidecar tools (`browser_snapshot`, `browser_click`, `browser_type`, `browser_hover`, `browser_drag`, `browser_press_key`, `browser_wait_for`, `browser_pdf_save`) and CLI `click` require Node tooling and CDP browsers. On Firefox, use the engine-agnostic primitives instead.
 
 Recovery
-- If a tab is gone or hung, list tabs, select another tab, or create a fresh named tab and retry.
+- If a tab is gone or hung, list tabs, select another tab; create a fresh tab only if none is usable, then retry.
 - URL regex selectors are unanchored unless you add `^` or `$`.
 "#;
 

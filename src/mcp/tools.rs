@@ -195,7 +195,9 @@ fn timeout_ms_arg(args: &Value, key: &str, default: Duration) -> Result<Duration
 fn make_navigate() -> RegisteredTool {
     RegisteredTool {
         name: "browser_navigate".into(),
-        description: "Navigate the active page to a URL.".into(),
+        description: "Navigate the active tab to a URL. Creates the tab if none exists. This is \
+                      the normal way to open a page; do not create a new tab first."
+            .into(),
         input_schema: json!({
             "type": "object",
             "properties": tab_args_properties(json!({ "url": { "type": "string" } })),
@@ -869,12 +871,17 @@ async fn tab_list_value(state: &ServerState) -> Result<Value> {
     Ok(Value::Array(arr))
 }
 
+/// Appended to `browser_tab_new` results when `tab-policy reuse` turned an
+/// unnamed new-tab request into a navigation of the active tab.
+const TAB_POLICY_REUSE_NOTE: &str = "tab policy reuse: navigated the active tab instead of opening a new one; pass `name` or set tab-policy free to open more";
+
 fn make_tab_new() -> RegisteredTool {
     RegisteredTool {
         name: "browser_tab_new".into(),
-        description: "Create a new tab and make it the active tab. Defaults to about:blank. \
-                      Pass `name` to create or select a durable named tab addressable as \
-                      `<browser>/<name>`."
+        description: "Open an additional tab. Use only when the current page must stay open \
+                      while working on another, or to create a durable named tab \
+                      (pass `name`, addressable as `<browser>/<name>`). For simply going \
+                      to a URL, use browser_navigate on the active tab."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -895,17 +902,46 @@ fn make_tab_new() -> RegisteredTool {
                     .and_then(|v| v.as_str())
                     .unwrap_or("about:blank")
                     .to_string();
-                let backend = state.ensure_backend().await?;
-                let tid = backend.create_tab(&url).await?;
-                *state.active_target_id.lock().await = Some(tid.clone());
-                Ok(text_content(serde_json::to_string_pretty(&json!({
-                    "target_id": tid,
-                    "url": url,
-                    "active": true,
-                }))?))
+                tab_new_unnamed(&state, &url, crate::config::TabPolicy::current()).await
             })
         }),
     }
+}
+
+/// Unnamed `browser_tab_new`. Under [`TabPolicy::Reuse`] with a live active
+/// tab, navigates that tab instead of creating another one.
+async fn tab_new_unnamed(
+    state: &ServerState,
+    url: &str,
+    policy: crate::config::TabPolicy,
+) -> Result<Value> {
+    let backend = state.ensure_backend().await?;
+    if policy == crate::config::TabPolicy::Reuse {
+        if let Some(tid) = state.live_active_tab(&backend).await? {
+            backend.navigate(&tid, url).await?;
+            return Ok(json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&json!({
+                            "target_id": tid,
+                            "url": url,
+                            "active": true,
+                            "reused": true,
+                        }))?,
+                    },
+                    { "type": "text", "text": TAB_POLICY_REUSE_NOTE },
+                ]
+            }));
+        }
+    }
+    let tid = backend.create_tab(url).await?;
+    *state.active_target_id.lock().await = Some(tid.clone());
+    Ok(text_content(serde_json::to_string_pretty(&json!({
+        "target_id": tid,
+        "url": url,
+        "active": true,
+    }))?))
 }
 
 async fn open_or_create_named_tab(
@@ -995,8 +1031,8 @@ fn make_tab_select() -> RegisteredTool {
     RegisteredTool {
         name: "browser_tab_select".into(),
         description: "Set the active tab. Probe-and-iterate: errors `TabHung` if the selected \
-                      tab doesn't respond to a 500ms probe (agent should pick another or call \
-                      `browser_tab_new`)."
+                      tab doesn't respond to a 500ms probe (agent should pick another tab or, \
+                      as a last resort, browser_tab_new)."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -2586,5 +2622,156 @@ mod tests {
             err.to_string().contains("mutually exclusive"),
             "got: {err:#}"
         );
+    }
+
+    // -- tab policy -----------------------------------------------------------
+
+    use crate::config::TabPolicy;
+
+    struct TabMock {
+        endpoint: String,
+        created: Arc<Mutex<u32>>,
+        navigated: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    /// Minimal CDP mock that tracks created targets and `Page.navigate` calls.
+    async fn spawn_tab_mock() -> TabMock {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let created = Arc::new(Mutex::new(0u32));
+        let navigated = Arc::new(Mutex::new(Vec::new()));
+        tokio::spawn({
+            let created = created.clone();
+            let navigated = navigated.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut targets: Vec<String> = Vec::new();
+                let mut sessions: std::collections::HashMap<String, String> = Default::default();
+                let mut next_session = 0u32;
+                while let Some(Ok(Message::Text(t))) = ws.next().await {
+                    let req: Value = serde_json::from_str(&t).unwrap();
+                    let id = req["id"].as_u64().unwrap();
+                    let result = match req["method"].as_str().unwrap_or("") {
+                        "Target.createTarget" => {
+                            let mut n = created.lock().await;
+                            *n += 1;
+                            let tid = format!("NEW{n}");
+                            targets.push(tid.clone());
+                            json!({"targetId": tid})
+                        }
+                        "Target.getTargets" => json!({
+                            "targetInfos": targets.iter().map(|t| json!({
+                                "targetId": t, "type": "page",
+                                "url": "about:blank", "title": "",
+                            })).collect::<Vec<_>>()
+                        }),
+                        "Target.attachToTarget" => {
+                            next_session += 1;
+                            let sid = format!("S{next_session}");
+                            sessions.insert(
+                                sid.clone(),
+                                req["params"]["targetId"].as_str().unwrap_or("").to_string(),
+                            );
+                            json!({"sessionId": sid})
+                        }
+                        "Page.navigate" => {
+                            let sid = req["sessionId"].as_str().unwrap_or("");
+                            navigated.lock().await.push((
+                                sessions.get(sid).cloned().unwrap_or_default(),
+                                req["params"]["url"].as_str().unwrap_or("").to_string(),
+                            ));
+                            json!({"frameId": "F"})
+                        }
+                        _ => json!({}),
+                    };
+                    let resp = json!({"id": id, "result": result});
+                    ws.send(Message::Text(resp.to_string())).await.unwrap();
+                }
+            }
+        });
+        TabMock {
+            endpoint: format!("ws://{addr}"),
+            created,
+            navigated,
+        }
+    }
+
+    fn mock_state(endpoint: String) -> ServerState {
+        ServerState::new(ResolvedBrowser {
+            engine: Engine::Cdp,
+            endpoint,
+            source: Source::External,
+        })
+    }
+
+    #[tokio::test]
+    async fn tab_new_reuse_navigates_live_active_tab() {
+        let mock = spawn_tab_mock().await;
+        let state = mock_state(mock.endpoint.clone());
+        // First call: no active tab, so a tab is created even under reuse.
+        let first = tab_new_unnamed(&state, "about:blank", TabPolicy::Reuse)
+            .await
+            .unwrap();
+        assert_eq!(first["content"].as_array().unwrap().len(), 1);
+        assert_eq!(*mock.created.lock().await, 1);
+
+        let out = tab_new_unnamed(&state, "https://example.com/", TabPolicy::Reuse)
+            .await
+            .unwrap();
+        assert_eq!(*mock.created.lock().await, 1, "must not open a second tab");
+        let nav = mock.navigated.lock().await;
+        assert_eq!(nav.len(), 1);
+        assert_eq!(nav[0].1, "https://example.com/");
+        assert_eq!(nav[0].0, "NEW1");
+        let content = out["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["text"], TAB_POLICY_REUSE_NOTE);
+        assert!(content[0]["text"].as_str().unwrap().contains("NEW1"));
+        assert_eq!(state.active_target_id.lock().await.as_deref(), Some("NEW1"));
+    }
+
+    #[tokio::test]
+    async fn tab_new_free_always_creates() {
+        let mock = spawn_tab_mock().await;
+        let state = mock_state(mock.endpoint.clone());
+        tab_new_unnamed(&state, "about:blank", TabPolicy::Free)
+            .await
+            .unwrap();
+        tab_new_unnamed(&state, "about:blank", TabPolicy::Free)
+            .await
+            .unwrap();
+        assert_eq!(*mock.created.lock().await, 2);
+        assert!(mock.navigated.lock().await.is_empty());
+        assert_eq!(state.active_target_id.lock().await.as_deref(), Some("NEW2"));
+    }
+
+    #[tokio::test]
+    async fn tab_new_reuse_creates_when_active_tab_is_dead() {
+        let mock = spawn_tab_mock().await;
+        let state = mock_state(mock.endpoint.clone());
+        *state.active_target_id.lock().await = Some("GONE".into());
+        tab_new_unnamed(&state, "about:blank", TabPolicy::Reuse)
+            .await
+            .unwrap();
+        assert_eq!(*mock.created.lock().await, 1);
+        assert!(mock.navigated.lock().await.is_empty());
+    }
+
+    #[test]
+    fn tab_descriptions_steer_toward_reuse() {
+        let registry = ToolRegistry::new();
+        register_all(&registry);
+        let list = registry.list();
+        let desc = |n: &str| {
+            list.iter()
+                .find(|t| t["name"] == n)
+                .and_then(|t| t["description"].as_str())
+                .unwrap()
+                .to_string()
+        };
+        assert!(desc("browser_navigate").contains("do not create a new tab first"));
+        assert!(desc("browser_tab_new").contains("use browser_navigate on the active tab"));
+        assert!(desc("browser_tab_select").contains("last resort"));
     }
 }
