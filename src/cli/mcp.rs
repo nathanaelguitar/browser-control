@@ -494,6 +494,7 @@ mod tests {
             config::save(&Config {
                 default: Some("chrome".into()),
                 mcp_default: Some("obscura".into()),
+                ..Config::default()
             })
             .unwrap();
             drop(reg);
@@ -533,6 +534,7 @@ mod tests {
             config::save(&Config {
                 default: Some("chrome".into()),
                 mcp_default: Some("inherit".into()),
+                ..Config::default()
             })
             .unwrap();
             drop(reg);

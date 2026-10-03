@@ -467,6 +467,14 @@ async fn spawn_recording_bidi_mock() -> (String, oneshot::Sender<()>, Arc<Mutex<
 }
 
 /// Wrap a `ServerState` around the given mock URL.
+/// Tests that open several tabs via unnamed `browser_tab_new` need the
+/// `free` tab policy (the default `reuse` navigates the active tab instead).
+/// Process-wide and never unset: every other test in this file is
+/// indifferent to the policy.
+fn use_free_tab_policy() {
+    std::env::set_var("BROWSER_CONTROL_TAB_POLICY", "free");
+}
+
 fn state_for_mock(url: &str) -> ServerState {
     ServerState::new(ResolvedBrowser {
         endpoint: url.into(),
@@ -528,6 +536,7 @@ async fn browser_show_reveals_or_creates_target() {
 
 #[tokio::test]
 async fn browser_tab_list_marks_active_tab() {
+    use_free_tab_policy();
     let (url, _stop) = spawn_cdp_mock(MockBehaviour::default()).await;
     let state = state_for_mock(&url);
     // Open two tabs; second is active.
@@ -664,6 +673,7 @@ async fn browser_navigate_uses_active_tab_when_no_args() {
 
 #[tokio::test]
 async fn browser_navigate_with_target_regex_routes_to_match() {
+    use_free_tab_policy();
     let (url, _stop) = spawn_cdp_mock(MockBehaviour::default()).await;
     let state = state_for_mock(&url);
     // Open two tabs; the second becomes active.

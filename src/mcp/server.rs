@@ -320,6 +320,17 @@ impl ServerState {
         Ok((backend, new_tid))
     }
 
+    /// The active MCP tab if one is set and still live. Unlike
+    /// [`Self::current_tab`] this never creates a tab.
+    pub async fn live_active_tab(&self, backend: &TabBackend) -> Result<Option<String>> {
+        let pointer = self.active_target_id.lock().await;
+        let Some(tid) = pointer.as_ref() else {
+            return Ok(None);
+        };
+        let live = backend.live_target_ids().await?;
+        Ok(live.contains(tid).then(|| tid.clone()))
+    }
+
     /// Resolve or create an MCP-owned tab for a fetch URL's origin.
     ///
     /// `TabBackend::resolve_or_create_for_origin` can only reuse targets

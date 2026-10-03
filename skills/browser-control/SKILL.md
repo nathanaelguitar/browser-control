@@ -50,13 +50,16 @@ Use the highest-level browser-control primitive available:
 
 ## Tabs
 
+- Reuse the active tab. Go to URLs with `browser_navigate`; open a new tab
+  only when the current page must stay open.
 - Prefer tab primitives over target IDs:
   - MCP: `browser_tab_list`, `browser_tab_new`, `browser_tab_select`,
     `browser_tab_close`.
   - CLI: `browser-control tab open <browser>/<name> [url]`,
     `tab list <browser> --all`, `tab adopt <browser>/<name> <target-id>`.
-- For repeatable work, create or select a named tab, then address it as
-  `<browser>/<tab>` in page-context CLI commands.
+- For durable multi-step workflows (not for every page), create or select a
+  named tab, then address it as `<browser>/<tab>` in page-context CLI
+  commands.
 - Use target IDs only to adopt an existing unnamed tab or as a last-resort
   diagnostic.
 - Browser-wide operations do not take tab names. Page-context operations do.
@@ -125,8 +128,8 @@ Use the highest-level browser-control primitive available:
 
 ## Recovery
 
-- If a tab is gone or hung, list tabs, select another tab, or create a
-  fresh named tab and retry.
+- If a tab is gone or hung, list tabs, select another tab; create a fresh
+  tab only if none is usable, then retry.
 - URL regex selectors are unanchored unless you add `^` or `$`.
 
 ## How this is installed
