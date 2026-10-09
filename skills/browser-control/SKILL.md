@@ -63,6 +63,7 @@ Use the highest-level browser-control primitive available:
 - Use target IDs only to adopt an existing unnamed tab or as a last-resort
   diagnostic.
 - Browser-wide operations do not take tab names. Page-context operations do.
+- Windows and tabs are closed for you: tabs the MCP server opened close when the session ends or after `tab-idle-close` minutes idle (default 10), and a browser browser-control launched quits after `browser-idle-quit` minutes idle (default 15) and relaunches on the next call. Do not rely on a tab or window staying open across long pauses; named tabs close too unless `keep-named-tabs` is on. Old sessions are never restored.
 
 ## Page and network work
 

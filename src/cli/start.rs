@@ -112,6 +112,7 @@ pub async fn ensure_started(
         started_at: registry::now_iso8601(),
     };
     registry.insert(&row)?;
+    launch::note_launched(&row.name);
     let _pid = handle.forget();
 
     if !no_wait {

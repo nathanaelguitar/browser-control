@@ -23,6 +23,7 @@ Tabs
 - For durable multi-step workflows (not for every page), create or select a named tab, then address it as `<browser>/<tab>` in page-context CLI commands.
 - Use target IDs only to adopt an existing unnamed tab or as a last-resort diagnostic.
 - Browser-wide operations do not take tab names. Page-context operations do.
+- Windows and tabs are closed for you: tabs the MCP server opened close when the session ends or after `tab-idle-close` minutes idle (default 10), and a browser browser-control launched quits after `browser-idle-quit` minutes idle (default 15) and relaunches on the next call. Do not rely on a tab or window staying open across long pauses; named tabs close too unless `keep-named-tabs` is on. Old sessions are never restored.
 
 Page and network work
 - Navigate and inspect with MCP primitives first: `browser_navigate`, `browser_snapshot`, `browser_get_html`, `browser_take_screenshot`, `browser_select_element`.

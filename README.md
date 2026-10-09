@@ -539,6 +539,50 @@ is active. `free` always opens a new tab. Set it with
 `browser-control set tab-policy free`, or override per process with
 `BROWSER_CONTROL_TAB_POLICY=free`.
 
+### Browser lifecycle
+
+The MCP server opens things only when needed and closes them when they stop
+being useful:
+
+- **Lazy launch.** `browser-control mcp` starts instantly and launches the
+  browser on the first tool call, not at server start.
+- **No old sessions.** browser-control owns the automation profiles under
+  `<config dir>/profiles/<kind>/default`. Before each launch of a managed
+  Chromium-family profile it sets `session.restore_on_startup=5` (new tab
+  page), removes `session.startup_urls`, marks the last exit clean
+  (`profile.exit_type=Normal`), and deletes saved session files
+  (`Sessions/Session_*`, `Sessions/Tabs_*`, legacy `Current/Last Session|Tabs`),
+  and launches with `--no-first-run --no-default-browser-check
+  --hide-crash-restore-bubble --noerrdialogs` (plus the legacy
+  `--disable-session-crashed-bubble`, which current Chromium ignores). Firefox
+  profiles get `browser.startup.page=0` and
+  `browser.sessionstore.resume_from_crash=false` in `user.js` and lose their
+  session store. A user's own profile or an attached external browser is never
+  touched. (Chromium on Windows may reset tracked `session.*` prefs it does
+  not recognise; the session-file deletion still prevents restore.)
+- **Close what it opened.** The server tracks tabs it created (unnamed tabs
+  and `browser_tab_new` tabs, including named ones) and never closes any other
+  tab. They are closed when the MCP session ends (client disconnect, SIGTERM,
+  SIGINT) and after `tab-idle-close` minutes without activity on that tab.
+  Named tabs close too by default; `browser-control set keep-named-tabs on`
+  keeps them. The last page in a window is blanked instead of closed so the
+  window survives.
+- **Quit idle browsers.** A browser browser-control launched is quit
+  gracefully (CDP `Browser.close`) after `browser-idle-quit` minutes without
+  MCP activity from any MCP server sharing it. It also quits when the server
+  that launched it exits and no other MCP server is using it. The next tool
+  call relaunches a fresh browser with a blank tab. A running tool call
+  (for example `browser_wait_for_cookie` while a human logs in after
+  `browser_show`) suspends both timers. Attached external browsers are never
+  quit. If a server dies uncleanly, its browser is cleaned up by the next MCP
+  server that sees it idle.
+
+| Setting | Default | Env override |
+| --- | --- | --- |
+| `browser-control set tab-idle-close <minutes\|off>` | `10` | `BROWSER_CONTROL_TAB_IDLE_CLOSE` |
+| `browser-control set browser-idle-quit <minutes\|off>` | `15` | `BROWSER_CONTROL_BROWSER_IDLE_QUIT` |
+| `browser-control set keep-named-tabs <on\|off>` | `off` | `BROWSER_CONTROL_KEEP_NAMED_TABS` |
+
 ```json
 {
   "mcpServers": {

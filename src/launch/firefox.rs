@@ -22,6 +22,10 @@ pub async fn launch(installed: &Installed, opts: LaunchOpts) -> Result<LaunchedH
             .with_context(|| format!("creating profile dir {}", opts.profile_dir.display()))?;
     }
 
+    if let Err(e) = super::profile::prepare_firefox_profile(&opts.profile_dir) {
+        tracing::warn!(target = "launch", error = %e, "profile hygiene failed; launching anyway");
+    }
+
     let log_path = opts.profile_dir.join("browser.log");
     let log_file =
         File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;

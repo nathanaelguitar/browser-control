@@ -34,6 +34,154 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub tab_policy: Option<String>,
+    /// Minutes of inactivity after which the MCP server closes tabs it
+    /// opened (`off` disables). Default 10. See [`IdleMinutes`].
+    /// Overridden by `BROWSER_CONTROL_TAB_IDLE_CLOSE`.
+    #[serde(
+        default,
+        rename = "tab-idle-close",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tab_idle_close: Option<String>,
+    /// Minutes of inactivity after which a browser that browser-control
+    /// launched is quit (`off` disables). Default 15. Overridden by
+    /// `BROWSER_CONTROL_BROWSER_IDLE_QUIT`.
+    #[serde(
+        default,
+        rename = "browser-idle-quit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub browser_idle_quit: Option<String>,
+    /// `on` keeps named (durable) tabs open when an MCP session ends or they
+    /// idle; default `off` (they are closed like any other tab the MCP
+    /// server opened). Overridden by `BROWSER_CONTROL_KEEP_NAMED_TABS`.
+    #[serde(
+        default,
+        rename = "keep-named-tabs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub keep_named_tabs: Option<String>,
+}
+
+/// Env var that overrides the persisted `tab-idle-close` setting.
+pub const TAB_IDLE_CLOSE_ENV: &str = "BROWSER_CONTROL_TAB_IDLE_CLOSE";
+/// Env var that overrides the persisted `browser-idle-quit` setting.
+pub const BROWSER_IDLE_QUIT_ENV: &str = "BROWSER_CONTROL_BROWSER_IDLE_QUIT";
+/// Env var that overrides the persisted `keep-named-tabs` setting.
+pub const KEEP_NAMED_TABS_ENV: &str = "BROWSER_CONTROL_KEEP_NAMED_TABS";
+
+/// Default minutes before an unused MCP-opened tab is closed.
+pub const DEFAULT_TAB_IDLE_CLOSE_MIN: u64 = 10;
+/// Default minutes before an unused browser-control-launched browser quits.
+pub const DEFAULT_BROWSER_IDLE_QUIT_MIN: u64 = 15;
+
+/// An idle timeout setting: a number of minutes, or off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleMinutes {
+    Off,
+    Minutes(u64),
+}
+
+impl IdleMinutes {
+    /// Parse `off` (also `never`, `0`, `none`, `false`) or a positive integer
+    /// number of minutes.
+    pub fn parse(value: &str) -> Result<Self> {
+        let v = value.trim().to_ascii_lowercase();
+        match v.as_str() {
+            "off" | "never" | "none" | "false" | "0" => Ok(IdleMinutes::Off),
+            other => match other.parse::<u64>() {
+                Ok(n) if n > 0 => Ok(IdleMinutes::Minutes(n)),
+                _ => Err(anyhow::anyhow!(
+                    "invalid idle timeout `{value}`; expected a number of minutes or `off`"
+                )),
+            },
+        }
+    }
+
+    /// Canonical stored form: `off` or the integer.
+    pub fn canonical(self) -> String {
+        match self {
+            IdleMinutes::Off => "off".into(),
+            IdleMinutes::Minutes(n) => n.to_string(),
+        }
+    }
+
+    /// The timeout as a duration; `None` when off.
+    pub fn duration(self) -> Option<std::time::Duration> {
+        match self {
+            IdleMinutes::Off => None,
+            IdleMinutes::Minutes(n) => Some(std::time::Duration::from_secs(n * 60)),
+        }
+    }
+
+    /// Valid env value wins over a valid config value, which wins over
+    /// `default_min`. Blank or invalid values are ignored.
+    pub fn resolve(config_value: Option<&str>, env_value: Option<&str>, default_min: u64) -> Self {
+        [env_value, config_value]
+            .into_iter()
+            .flatten()
+            .find_map(|v| Self::parse(v).ok())
+            .unwrap_or(IdleMinutes::Minutes(default_min))
+    }
+}
+
+/// Parse an `on`/`off` flag value.
+pub fn parse_on_off(value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Ok(true),
+        "off" | "false" | "no" | "0" => Ok(false),
+        other => Err(anyhow::anyhow!(
+            "invalid value `{other}`; expected `on` or `off`"
+        )),
+    }
+}
+
+/// Effective lifecycle settings for the MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifecycleSettings {
+    pub tab_idle_close: IdleMinutes,
+    pub browser_idle_quit: IdleMinutes,
+    pub keep_named_tabs: bool,
+}
+
+impl Default for LifecycleSettings {
+    fn default() -> Self {
+        Self {
+            tab_idle_close: IdleMinutes::Minutes(DEFAULT_TAB_IDLE_CLOSE_MIN),
+            browser_idle_quit: IdleMinutes::Minutes(DEFAULT_BROWSER_IDLE_QUIT_MIN),
+            keep_named_tabs: false,
+        }
+    }
+}
+
+impl LifecycleSettings {
+    pub fn resolve(cfg: &Config, env: impl Fn(&str) -> Option<String>) -> Self {
+        let keep_env = env(KEEP_NAMED_TABS_ENV);
+        let keep = [keep_env.as_deref(), cfg.keep_named_tabs.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|v| parse_on_off(v).ok())
+            .unwrap_or(false);
+        Self {
+            tab_idle_close: IdleMinutes::resolve(
+                cfg.tab_idle_close.as_deref(),
+                env(TAB_IDLE_CLOSE_ENV).as_deref(),
+                DEFAULT_TAB_IDLE_CLOSE_MIN,
+            ),
+            browser_idle_quit: IdleMinutes::resolve(
+                cfg.browser_idle_quit.as_deref(),
+                env(BROWSER_IDLE_QUIT_ENV).as_deref(),
+                DEFAULT_BROWSER_IDLE_QUIT_MIN,
+            ),
+            keep_named_tabs: keep,
+        }
+    }
+
+    /// Read from the environment and the config file.
+    pub fn current() -> Self {
+        let cfg = load().unwrap_or_default();
+        Self::resolve(&cfg, |k| std::env::var(k).ok())
+    }
 }
 
 /// Env var that overrides the persisted `tab-policy` setting.
@@ -91,7 +239,12 @@ impl TabPolicy {
 
 impl Config {
     pub fn is_empty(&self) -> bool {
-        self.default.is_none() && self.mcp_default.is_none() && self.tab_policy.is_none()
+        self.default.is_none()
+            && self.mcp_default.is_none()
+            && self.tab_policy.is_none()
+            && self.tab_idle_close.is_none()
+            && self.browser_idle_quit.is_none()
+            && self.keep_named_tabs.is_none()
     }
 }
 
@@ -163,6 +316,9 @@ mod tests {
             default: Some("firefox".into()),
             mcp_default: Some("obscura".into()),
             tab_policy: Some("free".into()),
+            tab_idle_close: Some("5".into()),
+            browser_idle_quit: Some("off".into()),
+            keep_named_tabs: Some("on".into()),
         };
         save_to(&p, &cfg).unwrap();
         let read = load_from(&p).unwrap();
@@ -173,6 +329,76 @@ mod tests {
         assert!(text.contains("default = \"firefox\""));
         assert!(text.contains("mcp-default = \"obscura\""));
         assert!(text.contains("tab-policy = \"free\""));
+        assert!(text.contains("tab-idle-close = \"5\""));
+        assert!(text.contains("browser-idle-quit = \"off\""));
+        assert!(text.contains("keep-named-tabs = \"on\""));
+    }
+
+    #[test]
+    fn idle_minutes_parse() {
+        assert_eq!(IdleMinutes::parse("off").unwrap(), IdleMinutes::Off);
+        assert_eq!(IdleMinutes::parse(" NEVER ").unwrap(), IdleMinutes::Off);
+        assert_eq!(IdleMinutes::parse("0").unwrap(), IdleMinutes::Off);
+        assert_eq!(IdleMinutes::parse("15").unwrap(), IdleMinutes::Minutes(15));
+        assert!(IdleMinutes::parse("-3").is_err());
+        assert!(IdleMinutes::parse("soon").is_err());
+        assert!(IdleMinutes::parse("").is_err());
+        assert_eq!(IdleMinutes::Minutes(2).canonical(), "2");
+        assert_eq!(
+            IdleMinutes::Minutes(2).duration(),
+            Some(std::time::Duration::from_secs(120))
+        );
+        assert_eq!(IdleMinutes::Off.duration(), None);
+    }
+
+    #[test]
+    fn idle_minutes_resolve_precedence() {
+        assert_eq!(
+            IdleMinutes::resolve(None, None, 10),
+            IdleMinutes::Minutes(10)
+        );
+        assert_eq!(
+            IdleMinutes::resolve(Some("3"), None, 10),
+            IdleMinutes::Minutes(3)
+        );
+        assert_eq!(
+            IdleMinutes::resolve(Some("3"), Some("off"), 10),
+            IdleMinutes::Off
+        );
+        // Invalid / blank env falls through to config.
+        assert_eq!(
+            IdleMinutes::resolve(Some("3"), Some("bogus"), 10),
+            IdleMinutes::Minutes(3)
+        );
+        assert_eq!(
+            IdleMinutes::resolve(Some("3"), Some(""), 10),
+            IdleMinutes::Minutes(3)
+        );
+    }
+
+    #[test]
+    fn lifecycle_settings_defaults_and_overrides() {
+        let none = |_: &str| None;
+        let d = LifecycleSettings::resolve(&Config::default(), none);
+        assert_eq!(d, LifecycleSettings::default());
+        assert_eq!(d.tab_idle_close, IdleMinutes::Minutes(10));
+        assert_eq!(d.browser_idle_quit, IdleMinutes::Minutes(15));
+        assert!(!d.keep_named_tabs);
+
+        let cfg = Config {
+            tab_idle_close: Some("4".into()),
+            keep_named_tabs: Some("on".into()),
+            ..Config::default()
+        };
+        let env = |k: &str| match k {
+            BROWSER_IDLE_QUIT_ENV => Some("1".to_string()),
+            TAB_IDLE_CLOSE_ENV => Some("off".to_string()),
+            _ => None,
+        };
+        let s = LifecycleSettings::resolve(&cfg, env);
+        assert_eq!(s.tab_idle_close, IdleMinutes::Off);
+        assert_eq!(s.browser_idle_quit, IdleMinutes::Minutes(1));
+        assert!(s.keep_named_tabs);
     }
 
     #[test]

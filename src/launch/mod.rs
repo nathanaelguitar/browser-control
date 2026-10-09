@@ -10,6 +10,7 @@ use crate::detect::{Engine, Installed, Kind};
 pub mod chromium;
 pub mod firefox;
 pub mod obscura;
+pub mod profile;
 
 #[derive(Debug, Clone)]
 pub struct LaunchOpts {
@@ -52,6 +53,25 @@ impl LaunchedHandle {
         }
         Ok(())
     }
+}
+
+static LAUNCHED_HERE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Record that this process launched the registered browser `name`.
+pub fn note_launched(name: &str) {
+    LAUNCHED_HERE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(name.to_string());
+}
+
+/// True if this process (not merely some earlier one) launched `name`.
+pub fn launched_by_this_process(name: &str) -> bool {
+    LAUNCHED_HERE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|n| n == name)
 }
 
 /// Allocate a free TCP port by binding to 0 then dropping the listener.
