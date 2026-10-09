@@ -919,6 +919,7 @@ async fn tab_new_unnamed(
     if policy == crate::config::TabPolicy::Reuse {
         if let Some(tid) = state.live_active_tab(&backend).await? {
             backend.navigate(&tid, url).await?;
+            state.lifecycle.touch_tab(&tid);
             return Ok(json!({
                 "content": [
                     {
@@ -935,7 +936,7 @@ async fn tab_new_unnamed(
             }));
         }
     }
-    let tid = backend.create_tab(url).await?;
+    let tid = state.create_owned_tab(&backend, url, None).await?;
     *state.active_target_id.lock().await = Some(tid.clone());
     Ok(text_content(serde_json::to_string_pretty(&json!({
         "target_id": tid,
@@ -975,6 +976,7 @@ async fn open_or_create_named_tab(
                 crate::mcp::server::sync_registry_op(move |reg| reg.tab_touch(&bn, &n)).await?;
             }
             *state.active_target_id.lock().await = Some(row.target_id.clone());
+            state.lifecycle.touch_tab(&row.target_id);
             return Ok(json!({
                 "name": name,
                 "target_id": row.target_id,
@@ -1010,7 +1012,9 @@ async fn open_or_create_named_tab(
         crate::mcp::server::sync_registry_op(move |reg| reg.tab_delete(&bn, &n)).await?;
     }
 
-    let target_id = backend.create_tab(&want_url).await?;
+    let target_id = state
+        .create_owned_tab(&backend, &want_url, Some(name))
+        .await?;
     let bn = browser_name;
     let n = name.to_string();
     let tid = target_id.clone();
@@ -1081,6 +1085,7 @@ fn make_tab_select() -> RegisteredTool {
                     .into());
                 }
                 *state.active_target_id.lock().await = Some(tid.clone());
+                state.lifecycle.touch_tab(&tid);
                 Ok(text_content(serde_json::to_string_pretty(&json!({
                     "target_id": tid,
                     "active": true,
@@ -1118,6 +1123,7 @@ fn make_tab_close() -> RegisteredTool {
                     }
                 };
                 backend.close_tab(&tid).await?;
+                state.lifecycle.untrack(&tid);
                 // If we just closed the active tab, clear the pointer.
                 let mut ptr = state.active_target_id.lock().await;
                 if ptr.as_deref() == Some(tid.as_str()) {
@@ -1320,6 +1326,7 @@ fn make_browser_show() -> RegisteredTool {
                     }
                 };
                 backend.show_tab(&target_id).await?;
+                state.lifecycle.touch_tab(&target_id);
                 Ok(text_content(serde_json::to_string_pretty(&json!({
                     "target_id": target_id,
                     "os_activated": os_activated,

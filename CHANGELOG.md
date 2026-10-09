@@ -4,6 +4,14 @@
 
 ### Added
 
+- Browser lifecycle for the MCP server: lazy browser launch, no session
+  restore in managed profiles (prefs rewrite, session-file cleanup and
+  no-restore flags, Firefox `user.js`), closing of tabs the server opened at
+  session end and after `tab-idle-close` minutes (default 10), and graceful
+  quit of idle browser-control-launched browsers after `browser-idle-quit`
+  minutes (default 15) with on-demand relaunch. New settings `tab-idle-close`,
+  `browser-idle-quit`, `keep-named-tabs` (env `BROWSER_CONTROL_TAB_IDLE_CLOSE`,
+  `BROWSER_CONTROL_BROWSER_IDLE_QUIT`, `BROWSER_CONTROL_KEEP_NAMED_TABS`).
 - Obscura (https://github.com/h4ckf0r0day/obscura), a headless Rust/V8 CDP
   engine, is a first-class browser kind: `start obscura`, `-b obscura`,
   `list-installed`, named tabs and every engine-agnostic tool. Discovery uses

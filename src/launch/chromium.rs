@@ -22,6 +22,11 @@ pub async fn launch(installed: &Installed, opts: LaunchOpts) -> Result<LaunchedH
     std::fs::create_dir_all(&opts.profile_dir)
         .with_context(|| format!("creating profile dir {}", opts.profile_dir.display()))?;
 
+    // browser-control owns managed profiles: never resume an old session.
+    if let Err(e) = super::profile::prepare_chromium_profile(&opts.profile_dir) {
+        tracing::warn!(target = "launch", error = %e, "profile hygiene failed; launching anyway");
+    }
+
     let log_path = opts.profile_dir.join("browser.log");
     let log_file =
         File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
@@ -32,8 +37,7 @@ pub async fn launch(installed: &Installed, opts: LaunchOpts) -> Result<LaunchedH
     let mut cmd = Command::new(&installed.executable);
     cmd.arg(format!("--remote-debugging-port={port}"))
         .arg(format!("--user-data-dir={}", opts.profile_dir.display()))
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
+        .args(super::profile::CHROMIUM_NO_RESTORE_FLAGS)
         .arg("--disable-component-update");
     if opts.headless {
         cmd.arg("--headless=new");

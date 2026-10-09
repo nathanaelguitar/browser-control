@@ -6,6 +6,14 @@
 //! * `mcp-default`: the browser the MCP server prefers over `default`
 //!   (overrides `BROWSER_CONTROL_MCP_DEFAULT`, which the Canopy extension sets
 //!   to `obscura`). `inherit` turns the preference off.
+//! * `tab-idle-close`: minutes of inactivity before tabs the MCP server
+//!   opened are closed (`off` disables; default 10). Env
+//!   `BROWSER_CONTROL_TAB_IDLE_CLOSE`.
+//! * `browser-idle-quit`: minutes of inactivity before a browser that
+//!   browser-control launched is quit (`off` disables; default 15). Env
+//!   `BROWSER_CONTROL_BROWSER_IDLE_QUIT`.
+//! * `keep-named-tabs`: `on` keeps named tabs open at MCP session end and
+//!   idle (default `off`). Env `BROWSER_CONTROL_KEEP_NAMED_TABS`.
 //! * `tab-policy`: `reuse` (default) or `free`. Under `reuse` an unnamed
 //!   `browser_tab_new` navigates the active MCP tab instead of opening
 //!   another. Overridden by `BROWSER_CONTROL_TAB_POLICY`.
@@ -29,6 +37,13 @@ pub enum Key {
     /// unnamed `browser_tab_new`; `free` always opens a new tab. Overridden
     /// by `BROWSER_CONTROL_TAB_POLICY`.
     TabPolicy,
+    /// Minutes before an unused MCP-opened tab is closed, or `off` (default 10).
+    TabIdleClose,
+    /// Minutes before an unused browser-control-launched browser quits, or
+    /// `off` (default 15).
+    BrowserIdleQuit,
+    /// `on` keeps named tabs open at MCP session end / idle (default `off`).
+    KeepNamedTabs,
 }
 
 impl Key {
@@ -37,6 +52,9 @@ impl Key {
             Key::Default => "default",
             Key::McpDefault => "mcp-default",
             Key::TabPolicy => "tab-policy",
+            Key::TabIdleClose => "tab-idle-close",
+            Key::BrowserIdleQuit => "browser-idle-quit",
+            Key::KeepNamedTabs => "keep-named-tabs",
         }
     }
 }
@@ -127,6 +145,9 @@ fn get(key: Key, cfg: &Config) -> Option<String> {
         Key::Default => cfg.default.clone(),
         Key::McpDefault => cfg.mcp_default.clone(),
         Key::TabPolicy => cfg.tab_policy.clone(),
+        Key::TabIdleClose => cfg.tab_idle_close.clone(),
+        Key::BrowserIdleQuit => cfg.browser_idle_quit.clone(),
+        Key::KeepNamedTabs => cfg.keep_named_tabs.clone(),
     }
 }
 
@@ -135,6 +156,9 @@ fn set(key: Key, cfg: &mut Config, value: Option<String>) {
         Key::Default => cfg.default = value,
         Key::McpDefault => cfg.mcp_default = value,
         Key::TabPolicy => cfg.tab_policy = value,
+        Key::TabIdleClose => cfg.tab_idle_close = value,
+        Key::BrowserIdleQuit => cfg.browser_idle_quit = value,
+        Key::KeepNamedTabs => cfg.keep_named_tabs = value,
     }
 }
 
@@ -143,6 +167,9 @@ fn take(key: Key, cfg: &mut Config) -> Option<String> {
         Key::Default => cfg.default.take(),
         Key::McpDefault => cfg.mcp_default.take(),
         Key::TabPolicy => cfg.tab_policy.take(),
+        Key::TabIdleClose => cfg.tab_idle_close.take(),
+        Key::BrowserIdleQuit => cfg.browser_idle_quit.take(),
+        Key::KeepNamedTabs => cfg.keep_named_tabs.take(),
     }
 }
 
@@ -157,6 +184,15 @@ fn canonicalize(key: Key, value: &str) -> Result<String> {
             Ok(crate::cli::mcp::MCP_DEFAULT_INHERIT.to_string())
         }
         Key::TabPolicy => Ok(config::TabPolicy::parse(value)?.as_str().to_string()),
+        Key::TabIdleClose | Key::BrowserIdleQuit => {
+            Ok(config::IdleMinutes::parse(value)?.canonical())
+        }
+        Key::KeepNamedTabs => Ok(if config::parse_on_off(value)? {
+            "on"
+        } else {
+            "off"
+        }
+        .into()),
         Key::Default | Key::McpDefault => {
             let sel = env_resolver::parse(value)?;
             Ok(match sel {
@@ -272,6 +308,24 @@ mod tests {
             assert_eq!(config::load().unwrap().tab_policy.as_deref(), Some("free"));
             run_unset(Key::TabPolicy, true).unwrap();
             assert!(config::load().unwrap().tab_policy.is_none());
+        });
+    }
+
+    #[test]
+    fn set_idle_keys_validate_and_canonicalize() {
+        with_tmp_config(|| {
+            run_set(Key::TabIdleClose, Some(" 7 ".into()), true).unwrap();
+            run_set(Key::BrowserIdleQuit, Some("OFF".into()), true).unwrap();
+            run_set(Key::KeepNamedTabs, Some("Yes".into()), true).unwrap();
+            let cfg = config::load().unwrap();
+            assert_eq!(cfg.tab_idle_close.as_deref(), Some("7"));
+            assert_eq!(cfg.browser_idle_quit.as_deref(), Some("off"));
+            assert_eq!(cfg.keep_named_tabs.as_deref(), Some("on"));
+            assert!(run_set(Key::TabIdleClose, Some("later".into()), true).is_err());
+            assert!(run_set(Key::KeepNamedTabs, Some("maybe".into()), true).is_err());
+            assert_eq!(config::load().unwrap().tab_idle_close.as_deref(), Some("7"));
+            run_unset(Key::TabIdleClose, true).unwrap();
+            assert!(config::load().unwrap().tab_idle_close.is_none());
         });
     }
 

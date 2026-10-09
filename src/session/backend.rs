@@ -84,6 +84,16 @@ impl TabBackend {
         }
     }
 
+    /// Ask the browser process to exit gracefully (CDP `Browser.close`,
+    /// BiDi `browser.close`). The reply may never arrive because the
+    /// connection drops as the browser exits; callers verify by pid.
+    pub async fn close_browser(&self) -> Result<()> {
+        match self {
+            TabBackend::Cdp(c) => c.send("Browser.close", json!({})).await.map(|_| ()),
+            TabBackend::Bidi(c) => c.send("browser.close", json!({})).await.map(|_| ()),
+        }
+    }
+
     /// Close a tab by id. Best-effort — both CDP and BiDi handle a
     /// missing id gracefully, and the caller's intent ("this tab is
     /// gone") is satisfied either way.

@@ -78,6 +78,32 @@ pub struct ServerState {
     /// (via `switch_browser`); `handle_tools_call` skips the read
     /// guard for it to avoid deadlocking with its own write guard.
     pub op_barrier: Arc<RwLock<()>>,
+    /// Tabs this server opened, activity timers and idle bookkeeping. See
+    /// [`crate::mcp::lifecycle`].
+    pub lifecycle: crate::mcp::lifecycle::Lifecycle,
+    /// Serializes on-demand browser launches so concurrent first calls start
+    /// one browser.
+    pub start_lock: Arc<Mutex<()>>,
+    /// Fixed lifecycle settings (tests); `None` reads config and env.
+    pub settings_override: Option<crate::config::LifecycleSettings>,
+    /// Replaces the real browser launch for on-demand starts (tests).
+    pub launcher: Option<BrowserLauncher>,
+}
+
+/// Starts a browser of the given kind and returns it, ready to use.
+pub type BrowserLauncher = Arc<
+    dyn Fn(crate::detect::Kind) -> futures_util::future::BoxFuture<'static, Result<ResolvedBrowser>>
+        + Send
+        + Sync,
+>;
+
+/// Registry-derived liveness of the active browser (see
+/// [`ServerState::ensure_active_browser_alive`]).
+enum BrowserStatus {
+    Alive(std::path::PathBuf),
+    Missing,
+    Dead(crate::registry::BrowserRow),
+    Unreachable(crate::registry::BrowserRow),
 }
 
 /// Three-state cache: `Pending` until first tool call attempts acquire;
@@ -112,7 +138,17 @@ impl ServerState {
             sidecar: Arc::new(Mutex::new(None)),
             sidecar_config,
             op_barrier: Arc::new(RwLock::new(())),
+            lifecycle: crate::mcp::lifecycle::Lifecycle::new(),
+            start_lock: Arc::new(Mutex::new(())),
+            settings_override: None,
+            launcher: None,
         }
+    }
+
+    /// Pin the lifecycle settings instead of reading config and env.
+    pub fn with_lifecycle_settings(mut self, s: crate::config::LifecycleSettings) -> Self {
+        self.settings_override = Some(s);
+        self
     }
 
     /// Lazy-spawn the Playwright sidecar against the current browser.
@@ -245,46 +281,90 @@ impl ServerState {
         use crate::cli::env_resolver::Source;
         use crate::registry::BrowserLiveness;
 
-        let resolved = self.browser_snapshot().await;
+        let mut resolved = self.browser_snapshot().await;
+        // Lazy launch: the browser named by a placeholder starts on first use.
+        if crate::mcp::lifecycle::is_pending(&resolved) {
+            resolved = self.start_pending_browser().await?;
+        }
         let Source::Registered { name } = resolved.source else {
             return Ok(());
         };
-        sync_registry_op(move |registry| {
+        let lookup = name.clone();
+        let status = sync_registry_op(move |registry| {
             let Some(row) = registry
-                .get_by_name(&name)
-                .with_context(|| format!("checking active browser `{name}`"))?
+                .get_by_name(&lookup)
+                .with_context(|| format!("checking active browser `{lookup}`"))?
             else {
-                let hint = "call `browser_start` to start a browser, or `browser_select` to switch to another live browser";
-                let kind_hint = generated_kind_hint(&name);
-                anyhow::bail!(
-                    "active browser `{name}` is no longer registered{kind_hint}; {hint}"
-                );
+                return Ok(BrowserStatus::Missing);
             };
-            match crate::registry::liveness(&row) {
-                BrowserLiveness::Alive => Ok(()),
+            Ok(match crate::registry::liveness(&row) {
+                BrowserLiveness::Alive => BrowserStatus::Alive(row.profile_dir),
                 BrowserLiveness::DeadPid => {
                     registry
                         .delete(&row.name)
                         .with_context(|| format!("pruning terminated browser {}", row.name))?;
-                    anyhow::bail!(
-                        "active browser `{}` has exited (pid {}); call `browser_start` with `{}` to launch/reuse a browser, or `browser_select` another live browser",
-                        row.name,
-                        row.pid,
-                        row.kind.as_str()
-                    );
+                    BrowserStatus::Dead(row)
                 }
-                BrowserLiveness::EndpointUnreachable => {
-                    anyhow::bail!(
-                        "active browser `{}` is not reachable at {} (pid {} still exists); retry, call `browser_start` with `{}` to launch/reuse a browser, or `browser_select` another live browser",
-                        row.name,
-                        row.endpoint,
-                        row.pid,
-                        row.kind.as_str()
-                    );
-                }
-            }
+                BrowserLiveness::EndpointUnreachable => BrowserStatus::Unreachable(row),
+            })
         })
-        .await
+        .await?;
+        match status {
+            BrowserStatus::Alive(profile_dir) => {
+                if crate::launch::profile::is_managed_profile(&profile_dir) {
+                    self.lifecycle.set_profile_dir(&profile_dir);
+                }
+                Ok(())
+            }
+            BrowserStatus::Missing => {
+                if let Some(kind) = self.idle_quit_kind(&name) {
+                    return self.relaunch_after_idle_quit(kind).await;
+                }
+                let hint = "call `browser_start` to start a browser, or `browser_select` to switch to another live browser";
+                let kind_hint = generated_kind_hint(&name);
+                anyhow::bail!("active browser `{name}` is no longer registered{kind_hint}; {hint}");
+            }
+            BrowserStatus::Dead(row) => {
+                if let Some(kind) = self.idle_quit_kind(&row.name) {
+                    return self.relaunch_after_idle_quit(kind).await;
+                }
+                anyhow::bail!(
+                    "active browser `{}` has exited (pid {}); call `browser_start` with `{}` to launch/reuse a browser, or `browser_select` another live browser",
+                    row.name,
+                    row.pid,
+                    row.kind.as_str()
+                );
+            }
+            BrowserStatus::Unreachable(row) => {
+                anyhow::bail!(
+                    "active browser `{}` is not reachable at {} (pid {} still exists); retry, call `browser_start` with `{}` to launch/reuse a browser, or `browser_select` another live browser",
+                    row.name,
+                    row.endpoint,
+                    row.pid,
+                    row.kind.as_str()
+                );
+            }
+        }
+    }
+
+    /// If `name` vanished because an MCP server idle-quit it, consume the
+    /// marker and return its kind so the browser can be relaunched.
+    fn idle_quit_kind(&self, name: &str) -> Option<crate::detect::Kind> {
+        if !crate::mcp::lifecycle::take_idle_quit_marker(name) {
+            return None;
+        }
+        name.split_once('-')
+            .and_then(|(prefix, _)| crate::detect::Kind::parse(prefix))
+    }
+
+    /// The active browser was idle-quit (possibly by another MCP server):
+    /// start a fresh one in its place and reset every cache bound to the old
+    /// process. Does not touch `op_barrier`; callers already hold a read guard.
+    async fn relaunch_after_idle_quit(&self, kind: crate::detect::Kind) -> Result<()> {
+        *self.browser.write().await = crate::mcp::lifecycle::pending_browser(kind);
+        self.reset_connection_state().await;
+        self.start_pending_browser().await?;
+        Ok(())
     }
 
     /// Resolve the MCP server's "active tab" — backed by an in-memory
@@ -311,11 +391,12 @@ impl ServerState {
         if let Some(tid) = pointer.as_ref() {
             let live = backend.live_target_ids().await?;
             if live.contains(tid) {
+                self.lifecycle.touch_tab(tid);
                 return Ok((backend, tid.clone()));
             }
             // Dead — fall through to recreate.
         }
-        let new_tid = backend.create_tab("about:blank").await?;
+        let new_tid = self.create_owned_tab(&backend, "about:blank", None).await?;
         *pointer = Some(new_tid.clone());
         Ok((backend, new_tid))
     }
@@ -351,6 +432,7 @@ impl ServerState {
 
         if let Some(cached) = origin_targets.get(&origin_root) {
             if live_ids.contains(cached.as_str()) {
+                self.lifecycle.touch_tab(cached);
                 return Ok((backend, cached.clone()));
             }
             origin_targets.remove(&origin_root);
@@ -365,7 +447,7 @@ impl ServerState {
             return Ok((backend, existing.id.clone()));
         }
 
-        let new_tid = backend.create_tab(&origin_root).await?;
+        let new_tid = self.create_owned_tab(&backend, &origin_root, None).await?;
         origin_targets.insert(origin_root, new_tid.clone());
         Ok((backend, new_tid))
     }
@@ -388,6 +470,12 @@ impl ServerState {
     /// snapshot. Surfaces `SessionError::TabHung` if every match is
     /// unresponsive within a 500ms probe.
     pub async fn resolve_target_for_args(&self, args: &Value) -> Result<(TabBackend, String)> {
+        let (backend, tid) = self.resolve_target_for_args_inner(args).await?;
+        self.lifecycle.touch_tab(&tid);
+        Ok((backend, tid))
+    }
+
+    async fn resolve_target_for_args_inner(&self, args: &Value) -> Result<(TabBackend, String)> {
         let tab = args.get("tab").and_then(|v| v.as_str()).map(String::from);
         let target = args
             .get("target")
@@ -466,6 +554,20 @@ impl ServerState {
     /// [`handle_tools_call`] acquires the write guard for `browser_select`
     /// before invoking this method.
     pub async fn switch_browser(&self, new_browser: ResolvedBrowser) -> Result<()> {
+        // Close the tabs this server opened in the browser we are leaving.
+        // Best-effort and bounded; the old browser keeps running.
+        if let Some(old) = self.backend.lock().await.clone() {
+            let ids = self
+                .lifecycle
+                .all_owned(self.lifecycle_settings().keep_named_tabs);
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.close_owned_tabs(&old, ids),
+            )
+            .await;
+        }
+        self.lifecycle.clear_tabs();
+        self.lifecycle.clear_profile();
         // Close the cached BiDi session if any (best-effort).
         {
             let mut bidi = self.bidi.lock().await;
@@ -646,7 +748,7 @@ pub(crate) async fn resolve_browser_send(
         Ok(browser) => Ok(browser),
         Err(resolve_err) => {
             if let Some(kind) = startable_kind {
-                crate::cli::mcp::start_and_resolve(Some(kind.as_str().to_string()), false, 30)
+                crate::cli::mcp::start_and_resolve_now(Some(kind.as_str().to_string()), false, 30)
                     .await
                     .with_context(|| {
                         format!(
@@ -761,8 +863,42 @@ impl ToolRegistry {
 }
 
 /// Run the server using the real stdin/stdout.
+///
+/// SIGTERM / SIGINT end the session the same way as stdin closing: the tabs
+/// this server opened are closed before the process exits.
 pub async fn run(state: ServerState, tools: ToolRegistry) -> Result<()> {
-    run_with_streams(state, tools, tokio::io::stdin(), tokio::io::stdout()).await
+    let cleanup_state = state.clone();
+    let serve = run_with_streams(state, tools, tokio::io::stdin(), tokio::io::stdout());
+    tokio::select! {
+        r = serve => r,
+        () = shutdown_signal() => {
+            cleanup_state.shutdown_cleanup().await;
+            Ok(())
+        }
+    }
+}
+
+/// Resolves on SIGTERM or Ctrl-C (SIGINT).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Run the server with injected I/O streams (used by tests).
@@ -803,62 +939,72 @@ where
         }
     });
 
+    let reaper = state.spawn_reaper(crate::mcp::lifecycle::REAP_TICK);
     let mut lines = BufReader::new(stdin).lines();
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let req: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = tx.send(error_frame(
-                    Value::Null,
-                    -32700,
-                    &format!("parse error: {e}"),
-                ));
+    let loop_result: Result<()> = async {
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
                 continue;
             }
-        };
-        let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = req.get("params").cloned().unwrap_or(Value::Null);
+            let req: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = tx.send(error_frame(
+                        Value::Null,
+                        -32700,
+                        &format!("parse error: {e}"),
+                    ));
+                    continue;
+                }
+            };
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            let params = req.get("params").cloned().unwrap_or(Value::Null);
 
-        // Notifications: no id, no response.
-        if id.is_null() && method == "notifications/initialized" {
-            continue;
-        }
+            // Notifications: no id, no response.
+            if id.is_null() && method == "notifications/initialized" {
+                continue;
+            }
 
-        // Dispatch. `initialize` / `ping` / `tools/list` are cheap synchronous
-        // frame builders; `tools/call` spawns its handler so the read loop
-        // stays responsive while a slow op runs. Each arm sends through the
-        // single writer task, preserving serialized stdout writes.
-        match method {
-            "initialize" => {
-                let _ = tx.send(handle_initialize(id));
-            }
-            "ping" => {
-                let _ = tx.send(handle_ping(id));
-            }
-            "tools/list" => {
-                let _ = tx.send(handle_tools_list(id, &tools));
-            }
-            "tools/call" => {
-                handle_tools_call(id, &params, &state, &tools, &tx);
-            }
-            _ => {
-                let _ = tx.send(error_frame(
-                    id,
-                    -32601,
-                    &format!("method not found: {method}"),
-                ));
+            // Dispatch. `initialize` / `ping` / `tools/list` are cheap
+            // synchronous frame builders; `tools/call` spawns its handler so
+            // the read loop stays responsive while a slow op runs. Each arm
+            // sends through the single writer task, preserving serialized
+            // stdout writes.
+            match method {
+                "initialize" => {
+                    let _ = tx.send(handle_initialize(id));
+                }
+                "ping" => {
+                    let _ = tx.send(handle_ping(id));
+                }
+                "tools/list" => {
+                    let _ = tx.send(handle_tools_list(id, &tools));
+                }
+                "tools/call" => {
+                    handle_tools_call(id, &params, &state, &tools, &tx);
+                }
+                _ => {
+                    let _ = tx.send(error_frame(
+                        id,
+                        -32601,
+                        &format!("method not found: {method}"),
+                    ));
+                }
             }
         }
+        Ok(())
     }
-    // stdin closed: drop our sender so the writer drains and exits, then
-    // wait for it so all buffered responses reach the wire before returning.
+    .await;
+    // Session over (stdin closed): stop the reaper, then close what this
+    // server opened. In-flight handlers are drained by the cleanup's barrier.
+    reaper.abort();
+    state.shutdown_cleanup().await;
+    // Drop our sender so the writer drains and exits, then wait for it so all
+    // buffered responses reach the wire before returning.
     drop(tx);
     let _ = writer.await;
-    Ok(())
+    loop_result
 }
 
 /// Build the `initialize` response frame: advertise the protocol version,
@@ -915,7 +1061,10 @@ fn handle_tools_call(
     let tx = tx.clone();
     let barrier = state.op_barrier.clone();
     let is_exclusive = name == "browser_select";
+    // Counts as in flight from dispatch (even while waiting on the barrier).
+    let call_guard = state.lifecycle.begin();
     tokio::spawn(async move {
+        let _call_guard = call_guard;
         let frame = match handler {
             // An unknown tool name is bad params, not a tool
             // failure: keep it a genuine `-32602` protocol error.

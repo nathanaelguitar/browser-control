@@ -12,6 +12,9 @@ pub async fn run_cli(
     browser_arg: Option<String>,
     playwright_version: Option<String>,
 ) -> Result<()> {
+    // The MCP server starts instantly and launches the browser only when a
+    // tool first needs it ("only open when needed").
+    set_lazy_start(true);
     let resolved = resolve_mcp_browser(browser_arg).await?;
     let sidecar_config = crate::sidecar::SidecarConfig {
         version: playwright_version,
@@ -237,7 +240,36 @@ pub(crate) fn startable_kind_from_selector(selector: &BrowserSelector) -> Option
     }
 }
 
+static LAZY_START: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// When set (by the MCP server), [`start_and_resolve`] returns a placeholder
+/// instead of launching; the browser starts on first use.
+pub fn set_lazy_start(on: bool) {
+    LAZY_START.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub async fn start_and_resolve(
+    browser: Option<String>,
+    headless: bool,
+    wait_timeout: u64,
+) -> Result<ResolvedBrowser> {
+    if LAZY_START.load(std::sync::atomic::Ordering::SeqCst) && !headless {
+        let installed = crate::detect::list_installed();
+        let kind = match browser.as_deref() {
+            None => crate::cli::start::first_chromium_or_first(&installed),
+            Some(s) => Kind::parse(s),
+        };
+        // Only defer when the launch would succeed; otherwise fall through so
+        // the caller sees the real error (and can fall back) up front.
+        if let Some(kind) = kind.filter(|k| installed.iter().any(|i| i.kind == *k)) {
+            return Ok(crate::mcp::lifecycle::pending_browser(kind));
+        }
+    }
+    start_and_resolve_now(browser, headless, wait_timeout).await
+}
+
+/// Launch (or reuse) a browser immediately, ignoring lazy-start mode.
+pub async fn start_and_resolve_now(
     browser: Option<String>,
     headless: bool,
     wait_timeout: u64,
