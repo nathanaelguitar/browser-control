@@ -579,7 +579,7 @@ being useful:
 
 | Setting | Default | Env override |
 | --- | --- | --- |
-| `browser-control set tab-idle-close <minutes\|off>` | `10` | `BROWSER_CONTROL_TAB_IDLE_CLOSE` |
+| `browser-control set tab-idle-close <minutes\|off>` | `45` | `BROWSER_CONTROL_TAB_IDLE_CLOSE` |
 | `browser-control set browser-idle-quit <minutes\|off>` | `15` | `BROWSER_CONTROL_BROWSER_IDLE_QUIT` |
 | `browser-control set keep-named-tabs <on\|off>` | `off` | `BROWSER_CONTROL_KEEP_NAMED_TABS` |
 

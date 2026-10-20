@@ -71,7 +71,7 @@ pub const BROWSER_IDLE_QUIT_ENV: &str = "BROWSER_CONTROL_BROWSER_IDLE_QUIT";
 pub const KEEP_NAMED_TABS_ENV: &str = "BROWSER_CONTROL_KEEP_NAMED_TABS";
 
 /// Default minutes before an unused MCP-opened tab is closed.
-pub const DEFAULT_TAB_IDLE_CLOSE_MIN: u64 = 10;
+pub const DEFAULT_TAB_IDLE_CLOSE_MIN: u64 = 45;
 /// Default minutes before an unused browser-control-launched browser quits.
 pub const DEFAULT_BROWSER_IDLE_QUIT_MIN: u64 = 15;
 
@@ -381,7 +381,7 @@ mod tests {
         let none = |_: &str| None;
         let d = LifecycleSettings::resolve(&Config::default(), none);
         assert_eq!(d, LifecycleSettings::default());
-        assert_eq!(d.tab_idle_close, IdleMinutes::Minutes(10));
+        assert_eq!(d.tab_idle_close, IdleMinutes::Minutes(45));
         assert_eq!(d.browser_idle_quit, IdleMinutes::Minutes(15));
         assert!(!d.keep_named_tabs);
 
